@@ -12,6 +12,7 @@ jobs:
     name: Create GitHub release
     permissions:
       contents: write
+      packages: write
     runs-on: ubuntu-latest
     environment: foss-production
     steps:
@@ -32,6 +33,43 @@ jobs:
           abbrev: false
           commit-ish: HEAD
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a #v4.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd #v4.0.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 #v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate Docker metadata
+        id: docker-meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf #v6.0.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+          labels: |
+            org.opencontainers.image.title=Octi Server
+            org.opencontainers.image.description=Synchronization server for Octi
+            org.opencontainers.image.vendor=d4rken-org
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 #v7.0.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.docker-meta.outputs.tags }}
+          labels: ${{ steps.docker-meta.outputs.labels }}
+          annotations: ${{ steps.docker-meta.outputs.annotations }}
+
       - name: Package application
         run: ./gradlew installDist
 
@@ -39,7 +77,7 @@ jobs:
         run: zip -r octi-server.zip ./build/install/octi-server
 
       - name: Create pre-release
-        if: contains(steps.tagger.outputs.tag, '-beta')
+        if: contains(steps.tagger.outputs.tag, '-')
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 #v1
         with:
           prerelease: true
@@ -51,7 +89,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create release
-        if: "!contains(steps.tagger.outputs.tag, '-beta')"
+        if: "!contains(steps.tagger.outputs.tag, '-')"
         uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 #v1
         with:
           prerelease: false

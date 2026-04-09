@@ -1,0 +1,10 @@
+.git
+.github
+.gradle
+.idea
+.claude
+build
+out
+octi-data
+current.log
+*.iml

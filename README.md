@@ -31,8 +31,10 @@ The following flags are available:
 
 The default data volume is `/etc/octi-server`.
 
+Stable releases are published as `:latest` and `:X.Y.Z`. Pre-release tags such as `-beta` or `-rc` are published only as their explicit version tag.
+
 ```bash
-docker run -v octi-data:/etc/octi-server -p 8080:8080 ghcr.io/d4rken-org/octi-server
+docker run -v octi-data:/etc/octi-server -p 8080:8080 ghcr.io/d4rken-org/octi-server:latest
 ```
 
 Environment variables:
