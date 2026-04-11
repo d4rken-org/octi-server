@@ -64,15 +64,20 @@ Existing endpoints remain:
 - `POST /v1/module/{moduleId}`
 - `DELETE /v1/module/{moduleId}`
 
+These continue to use the existing target-device query parameter model:
+
+- `?device-id={targetDeviceId}` selects which device-owned module instance is being read or written
+- the effective scope is `(accountId, targetDeviceId, moduleId)`, not just `moduleId`
+
 Legacy behavior on the new backend:
 
 - legacy `GET` returns the current root document bytes exactly as before
-- legacy `POST` is internally translated to "replace the root document and clear external blob refs" only for modules that do not currently use external blobs
+- legacy `POST` is internally translated to "replace the root document and clear external blob refs" only for targeted module instances that do not currently use external blobs
 - legacy `DELETE` deletes the whole module, including live blobs and staged uploads
 
 Safety rule:
 
-- if a module currently has external blobs, legacy `POST /v1/module/{moduleId}` returns `409 Conflict`
+- if the targeted `(accountId, targetDeviceId, moduleId)` currently has external blobs, legacy `POST /v1/module/{moduleId}?device-id={targetDeviceId}` returns `409 Conflict`
 
 Reason:
 
@@ -81,10 +86,28 @@ Reason:
 
 ## New API Surface
 
+### Targeting Model
+
+Blob and commit operations are scoped to a device-owned module instance, not only a module name.
+
+Endpoints that operate on live module/blob state must include the existing target-device query parameter:
+
+- `?device-id={targetDeviceId}`
+
+This applies to:
+
+- raw module reads and writes
+- blob reads
+- blob listing
+- upload-session creation
+- module commits
+
+Follow-up upload-session endpoints do not need `device-id` because `sessionId` metadata already binds the session to its target account, device, and module.
+
 ### Blob Download
 
-- `HEAD /v1/module/{moduleId}/blobs/{blobId}`
-- `GET /v1/module/{moduleId}/blobs/{blobId}`
+- `HEAD /v1/module/{moduleId}/blobs/{blobId}?device-id={targetDeviceId}`
+- `GET /v1/module/{moduleId}/blobs/{blobId}?device-id={targetDeviceId}`
 
 Behavior:
 
@@ -92,9 +115,35 @@ Behavior:
 - supports full HTTP range requests
 - returns `ETag`, `Last-Modified`, `Content-Length`, `Accept-Ranges`
 
+### Blob List
+
+- `GET /v1/module/{moduleId}/blobs?device-id={targetDeviceId}`
+
+Behavior:
+
+- returns the current live blob set for the targeted module instance
+- reads from `module.json`, not from a filesystem directory scan
+- returns the same module revision `ETag` as the corresponding raw `GET /v1/module/{moduleId}?device-id={targetDeviceId}` read path
+
+Suggested response body:
+
+```json
+{
+  "moduleEtag": "current-module-etag",
+  "blobs": [
+    {
+      "blobId": "server-generated-id",
+      "sizeBytes": 5242880,
+      "hashAlgorithm": "sha256",
+      "hashHex": "optional-lowercase-hex"
+    }
+  ]
+}
+```
+
 ### Resumable Upload Sessions
 
-- `POST /v1/module/{moduleId}/blob-sessions`
+- `POST /v1/module/{moduleId}/blob-sessions?device-id={targetDeviceId}`
 - `HEAD /v1/module/{moduleId}/blob-sessions/{sessionId}`
 - `PATCH /v1/module/{moduleId}/blob-sessions/{sessionId}`
 - `POST /v1/module/{moduleId}/blob-sessions/{sessionId}/finalize`
@@ -113,7 +162,7 @@ Behavior:
 
 ### New Module Commit
 
-- `PUT /v1/module/{moduleId}`
+- `PUT /v1/module/{moduleId}?device-id={targetDeviceId}`
 
 Behavior:
 
@@ -122,10 +171,12 @@ Behavior:
 - atomically installs the new root document and authoritative blob ref list
 - promotes completed staged blobs into live blobs if referenced
 - deletes old live blobs that are no longer referenced by the committed module revision
+- decodes `documentBase64` and stores the raw root document bytes on disk
+- preserves the existing raw read behavior for `GET /v1/module/{moduleId}?device-id={targetDeviceId}`
 
 ### Blob Session Request Schema
 
-`POST /v1/module/{moduleId}/blob-sessions`
+`POST /v1/module/{moduleId}/blob-sessions?device-id={targetDeviceId}`
 
 Request body:
 
@@ -211,7 +262,7 @@ Response body:
 
 ### Module Commit Request Schema
 
-`PUT /v1/module/{moduleId}`
+`PUT /v1/module/{moduleId}?device-id={targetDeviceId}`
 
 Request headers:
 
@@ -236,6 +287,17 @@ Rules:
 - `documentBase64` is required
 - `blobRefs` is the authoritative live blob set for the new module revision
 - every referenced `blobId` must already be live for that module or be in a finalized staged session for that module
+
+### Module Read Semantics
+
+`GET /v1/module/{moduleId}?device-id={targetDeviceId}` continues to return the raw root document bytes, not the JSON commit envelope.
+
+Rules:
+
+- the server decodes `documentBase64` during `PUT` and persists only the raw document bytes in `payload.blob`
+- both legacy and new-client module reads return raw encrypted document bytes
+- the response `ETag` identifies the current module revision
+- `GET /v1/module/{moduleId}/blobs?device-id={targetDeviceId}` should expose the same revision via `moduleEtag` so clients can detect mismatches and refetch if needed
 
 Response body:
 
@@ -601,11 +663,11 @@ New module commits require `If-Match`.
 
 Rules:
 
-- `GET /v1/module/{moduleId}` returns the current `ETag`
-- `PUT /v1/module/{moduleId}` must include `If-Match`
+- `GET /v1/module/{moduleId}?device-id={targetDeviceId}` returns the current `ETag`
+- `PUT /v1/module/{moduleId}?device-id={targetDeviceId}` must include `If-Match`
 - if the module changed since the client read it, return `412 Precondition Failed`
 
-Legacy `POST /v1/module/{moduleId}` remains last-write-wins only for legacy-compatible modules without external blobs.
+Legacy `POST /v1/module/{moduleId}?device-id={targetDeviceId}` remains last-write-wins only for legacy-compatible targeted module instances without external blobs.
 
 ## Commit Semantics
 
@@ -635,6 +697,7 @@ Behavior:
 - upload session changes do not emit sync notifications
 - successful module commit emits `module_changed`
 - module delete emits `module_changed` with `deleted`
+- the event payload continues to include both `deviceId` and `moduleId` so clients can refresh the targeted module instance only
 
 This keeps sync behavior aligned with "the module revision changed" rather than low-level upload progress.
 
@@ -715,7 +778,7 @@ Phase 3:
 
 Phase 4:
 
-- add new `PUT /v1/module/{moduleId}` commit path
+- add new `PUT /v1/module/{moduleId}?device-id={targetDeviceId}` commit path
 - keep legacy `GET/POST/DELETE`
 - return `409` for legacy writes to blob-backed modules
 
@@ -728,16 +791,19 @@ Phase 5:
 Integration tests should cover at least:
 
 - legacy clients still reading and writing legacy-only modules
-- legacy write rejected with `409` once a module has external blobs
+- legacy write rejected with `409` only for the targeted device+module instance once that instance has external blobs
 - creating a resumable session reserves quota
 - session `HEAD` returns correct offset and expiry data
 - interrupted upload can resume from last confirmed offset
 - invalid checksum syntax returns `400`
 - checksum mismatch at finalize returns `422`
 - completed upload does not become visible until module commit
+- `GET /v1/module/{moduleId}?device-id={targetDeviceId}` still returns raw document bytes after a successful `PUT`
 - commit installs new root document and blob refs atomically
+- blob download and blob listing work across devices using `?device-id={targetDeviceId}`
 - range `GET` and `HEAD` for blobs
 - `If-Match` conflict returns `412`
+- WebSocket `module_changed` continues to include both `deviceId` and `moduleId`
 - aborting or expiring sessions releases quota
 - deleting module/device/account removes live and staged blob data
 - startup recovery rebuilds usage and reservations correctly
@@ -751,12 +817,14 @@ Integration tests should cover at least:
 ## Decisions Already Made
 
 - keep compatibility with old clients
-- reject legacy writes with `409` if a module already uses external blobs
+- reject legacy writes with `409` if the targeted device-owned module instance already uses external blobs
 - use module-scoped blobs only
 - no cross-module deduplication
 - use server-generated `blobId` values and server-only `storageKey` values
 - allow optional checksum declaration at session creation and require checksum verification by finalize time
 - persist plaintext blob IDs, storage keys, and blob sizes for quota and cleanup
+- keep target-device addressing via `?device-id={targetDeviceId}` for module-scoped blob and commit operations
+- expose a blob list endpoint backed by `module.json`
 - support resumable uploads
 - support full HTTP range for blob downloads
 - use account-level quota
