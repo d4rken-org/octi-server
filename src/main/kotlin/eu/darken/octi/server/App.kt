@@ -7,6 +7,8 @@ import eu.darken.octi.server.common.debug.logging.Logging.Priority.*
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
 import eu.darken.octi.server.common.debug.DebugFlagMonitor
+import eu.darken.octi.server.module.StartupRecoveryService
+import eu.darken.octi.server.module.UploadSessionRepo
 import java.nio.file.Path
 import java.time.Duration
 import javax.inject.Inject
@@ -18,10 +20,14 @@ import kotlin.reflect.full.memberProperties
 class App @Inject constructor(
     val appScope: AppScope,
     private val server: Server,
+    private val startupRecovery: StartupRecoveryService,
+    private val sessionRepo: UploadSessionRepo,
     @Suppress("unused") private val debugFlagMonitor: DebugFlagMonitor,
 ) {
 
     fun launch() {
+        startupRecovery.recover()
+        sessionRepo.startGC()
         server.start()
     }
 
@@ -46,6 +52,14 @@ class App @Inject constructor(
         val deviceGCInterval: Duration = Duration.ofMinutes(10),
         val moduleExpiration: Duration = Duration.ofDays(90),
         val moduleGCInterval: Duration = Duration.ofMinutes(10),
+        // Storage quota settings
+        val accountQuotaBytes: Long = 50L * 1024 * 1024, // 50 MB default
+        val maxBlobBytes: Long = 10L * 1024 * 1024, // 10 MB default
+        val maxModuleDocumentBytes: Long = 256L * 1024, // 256 KB default
+        val maxActiveUploadSessionsPerDevice: Int = 8,
+        val idleSessionTtlSeconds: Long = 3600, // 1 hour
+        val absoluteSessionTtlSeconds: Long = 86400, // 24 hours
+        val maxBlobPatchBytes: Long = 1L * 1024 * 1024, // 1 MB per chunk
     )
 
     companion object {

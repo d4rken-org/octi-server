@@ -41,6 +41,7 @@ class SyncNotifier @Inject constructor(
                 val moduleId: String,
                 val modifiedAt: String,
                 val action: String,
+                val sourceDeviceId: String? = null,
             ) : Event
         }
     }
@@ -57,14 +58,16 @@ class SyncNotifier @Inject constructor(
     suspend fun enqueueModuleChanged(
         accountId: AccountId,
         sourceDeviceId: DeviceId,
+        targetDeviceId: DeviceId,
         moduleId: String,
         action: String = "updated",
     ) {
         val event = EventPayload.Event.ModuleChanged(
-            deviceId = sourceDeviceId.toString(),
+            deviceId = targetDeviceId.toString(),
             moduleId = moduleId,
             modifiedAt = Instant.now().toString(),
             action = action,
+            sourceDeviceId = sourceDeviceId.toString(),
         )
 
         lock.withLock {
@@ -108,7 +111,11 @@ class SyncNotifier @Inject constructor(
                 val peerDeviceIdStr = peer.deviceId.toString()
                 val relevantEvents = broadcast.events.filter { event ->
                     when (event) {
-                        is EventPayload.Event.ModuleChanged -> event.deviceId != peerDeviceIdStr
+                        is EventPayload.Event.ModuleChanged -> {
+                            // Self-suppression: filter on sourceDeviceId (the actor), not deviceId (the target)
+                            val source = event.sourceDeviceId ?: event.deviceId
+                            source != peerDeviceIdStr
+                        }
                     }
                 }
                 if (relevantEvents.isEmpty()) {

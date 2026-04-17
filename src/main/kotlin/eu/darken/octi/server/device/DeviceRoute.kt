@@ -7,6 +7,7 @@ import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
 import eu.darken.octi.server.common.debug.logging.shortId
 import eu.darken.octi.server.common.verifyCaller
+import eu.darken.octi.server.module.ModuleLifecycleService
 import eu.darken.octi.server.module.ModuleRepo
 import io.ktor.http.*
 import io.ktor.server.request.*
@@ -20,6 +21,7 @@ import javax.inject.Singleton
 class DeviceRoute @Inject constructor(
     private val deviceRepo: DeviceRepo,
     private val moduleRepo: ModuleRepo,
+    private val lifecycleService: ModuleLifecycleService,
 ) {
 
     fun setup(rootRoute: Routing) {
@@ -91,8 +93,8 @@ class DeviceRoute @Inject constructor(
             return
         }
 
+        lifecycleService.deleteForDevice(callerDevice.accountId, targetDevice)
         deviceRepo.deleteDevice(targetKey)
-        moduleRepo.clear(callerDevice, setOf(targetDevice))
 
         call.respond(HttpStatusCode.OK).also {
             log(TAG, INFO) { "delete(${callerDevice.id.shortId()}): Device deleted: ${deviceId.shortId()}" }
@@ -121,7 +123,9 @@ class DeviceRoute @Inject constructor(
 
         log(TAG, INFO) { "resetDevices(${callerDevice.id.shortId()}): Resetting ${targetDevices.size} devices" }
 
-        moduleRepo.clear(callerDevice, targetDevices)
+        for (target in targetDevices) {
+            lifecycleService.deleteForDevice(callerDevice.accountId, target)
+        }
 
         call.respond(HttpStatusCode.OK).also {
             log(TAG, INFO) { "resetDevices(${callerDevice.id.shortId()}): Devices were reset" }

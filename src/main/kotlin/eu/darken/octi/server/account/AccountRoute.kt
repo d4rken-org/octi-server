@@ -1,7 +1,9 @@
 package eu.darken.octi.server.account
 
 import eu.darken.octi.server.account.share.ShareRepo
-import eu.darken.octi.server.common.debug.logging.Logging.Priority.*
+import eu.darken.octi.server.common.debug.logging.Logging.Priority.ERROR
+import eu.darken.octi.server.common.debug.logging.Logging.Priority.INFO
+import eu.darken.octi.server.common.debug.logging.Logging.Priority.WARN
 import eu.darken.octi.server.common.debug.logging.asLog
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
@@ -11,6 +13,7 @@ import eu.darken.octi.server.common.normalizeLabel
 import eu.darken.octi.server.common.verifyCaller
 import eu.darken.octi.server.device.DeviceRepo
 import eu.darken.octi.server.device.deviceCredentials
+import eu.darken.octi.server.module.ModuleLifecycleService
 import io.ktor.http.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
@@ -24,6 +27,7 @@ class AccountRoute @Inject constructor(
     private val accountRepo: AccountRepo,
     private val deviceRepo: DeviceRepo,
     private val shareRepo: ShareRepo,
+    private val lifecycleService: ModuleLifecycleService,
 ) {
 
     fun setup(rootRoute: Routing) {
@@ -134,6 +138,8 @@ class AccountRoute @Inject constructor(
         log(TAG, INFO) { "delete(${callerDevice.id.shortId()}): Deleting account ${callerDevice.accountId.shortId()}" }
 
         withContext(NonCancellable) {
+            // Abort sessions and release quota before deleting data
+            lifecycleService.deleteForAccount(callerDevice.accountId)
             deviceRepo.deleteDevices(callerDevice.accountId)
             shareRepo.removeSharesForAccount(callerDevice.accountId)
             accountRepo.deleteAccounts(listOf(callerDevice.accountId))

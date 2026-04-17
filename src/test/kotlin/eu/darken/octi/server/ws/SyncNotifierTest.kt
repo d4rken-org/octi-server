@@ -41,7 +41,7 @@ class SyncNotifierTest {
     fun `single event is broadcast after debounce delay`() = runBlocking {
         val session = registerDevice(device2, accountId)
 
-        notifier.enqueueModuleChanged(accountId, device1, "eu.darken.octi.module.power")
+        notifier.enqueueModuleChanged(accountId, device1, device1, "eu.darken.octi.module.power")
 
         val payload = withTimeout(3000) { session.outbox.receive() }
         payload shouldContain "module_changed"
@@ -53,9 +53,9 @@ class SyncNotifierTest {
     fun `burst writes are batched into single notification`() = runBlocking {
         val session = registerDevice(device2, accountId)
 
-        notifier.enqueueModuleChanged(accountId, device1, "eu.darken.octi.module.power")
-        notifier.enqueueModuleChanged(accountId, device1, "eu.darken.octi.module.meta")
-        notifier.enqueueModuleChanged(accountId, device1, "eu.darken.octi.module.wifi")
+        notifier.enqueueModuleChanged(accountId, device1, device1, "eu.darken.octi.module.power")
+        notifier.enqueueModuleChanged(accountId, device1, device1, "eu.darken.octi.module.meta")
+        notifier.enqueueModuleChanged(accountId, device1, device1, "eu.darken.octi.module.wifi")
 
         val payload = withTimeout(3000) { session.outbox.receive() }
         val parsed = json.decodeFromString<SyncNotifier.EventPayload>(payload)
@@ -67,7 +67,7 @@ class SyncNotifierTest {
         val session1 = registerDevice(device1, accountId)
         val session2 = registerDevice(device2, accountId)
 
-        notifier.enqueueModuleChanged(accountId, device1, "eu.darken.octi.module.power")
+        notifier.enqueueModuleChanged(accountId, device1, device1, "eu.darken.octi.module.power")
 
         val payload = withTimeout(3000) { session2.outbox.receive() }
         payload shouldContain "module_changed"
@@ -78,7 +78,7 @@ class SyncNotifierTest {
 
     @Test
     fun `no peers means no broadcast`() = runBlocking {
-        notifier.enqueueModuleChanged(accountId, device1, "eu.darken.octi.module.power")
+        notifier.enqueueModuleChanged(accountId, device1, device1, "eu.darken.octi.module.power")
         Thread.sleep(1500)
         // No exceptions = success
     }
@@ -87,7 +87,7 @@ class SyncNotifierTest {
     fun `delete action is included in notification`() = runBlocking {
         val session = registerDevice(device2, accountId)
 
-        notifier.enqueueModuleChanged(accountId, device1, "eu.darken.octi.module.power", action = "deleted")
+        notifier.enqueueModuleChanged(accountId, device1, device1, "eu.darken.octi.module.power", action = "deleted")
 
         val payload = withTimeout(3000) { session.outbox.receive() }
         payload shouldContain "deleted"
@@ -98,8 +98,8 @@ class SyncNotifierTest {
         val session1 = registerDevice(device1, accountId)
         val session2 = registerDevice(device2, accountId)
 
-        notifier.enqueueModuleChanged(accountId, device1, "eu.darken.octi.module.power")
-        notifier.enqueueModuleChanged(accountId, device2, "eu.darken.octi.module.meta")
+        notifier.enqueueModuleChanged(accountId, device1, device1, "eu.darken.octi.module.power")
+        notifier.enqueueModuleChanged(accountId, device2, device2, "eu.darken.octi.module.meta")
 
         val payload1 = withTimeout(3000) { session1.outbox.receive() }
         val parsed1 = json.decodeFromString<SyncNotifier.EventPayload>(payload1)
@@ -117,8 +117,8 @@ class SyncNotifierTest {
         val session1 = registerDevice(device1, accountId)
         val session2 = registerDevice(device2, accountId)
 
-        notifier.enqueueModuleChanged(accountId, device1, "eu.darken.octi.module.power")
-        notifier.enqueueModuleChanged(accountId, device2, "eu.darken.octi.module.meta")
+        notifier.enqueueModuleChanged(accountId, device1, device1, "eu.darken.octi.module.power")
+        notifier.enqueueModuleChanged(accountId, device2, device2, "eu.darken.octi.module.meta")
 
         // Wait for debounce to fire
         Thread.sleep(1500)
@@ -139,9 +139,9 @@ class SyncNotifierTest {
         val session2 = registerDevice(device2, accountId)
         val session3 = registerDevice(device3, accountId)
 
-        notifier.enqueueModuleChanged(accountId, device1, "eu.darken.octi.module.power")
-        notifier.enqueueModuleChanged(accountId, device2, "eu.darken.octi.module.meta")
-        notifier.enqueueModuleChanged(accountId, device3, "eu.darken.octi.module.wifi")
+        notifier.enqueueModuleChanged(accountId, device1, device1, "eu.darken.octi.module.power")
+        notifier.enqueueModuleChanged(accountId, device2, device2, "eu.darken.octi.module.meta")
+        notifier.enqueueModuleChanged(accountId, device3, device3, "eu.darken.octi.module.wifi")
 
         val payload1 = withTimeout(3000) { session1.outbox.receive() }
         val parsed1 = json.decodeFromString<SyncNotifier.EventPayload>(payload1)
@@ -164,10 +164,10 @@ class SyncNotifierTest {
         val session = registerDevice(device2, accountId)
 
         // Rapid-fire enqueue: each cancels the previous debounce job
-        notifier.enqueueModuleChanged(accountId, device1, "eu.darken.octi.module.power")
-        notifier.enqueueModuleChanged(accountId, device1, "eu.darken.octi.module.meta")
-        notifier.enqueueModuleChanged(accountId, device1, "eu.darken.octi.module.wifi")
-        notifier.enqueueModuleChanged(accountId, device1, "eu.darken.octi.module.apps")
+        notifier.enqueueModuleChanged(accountId, device1, device1, "eu.darken.octi.module.power")
+        notifier.enqueueModuleChanged(accountId, device1, device1, "eu.darken.octi.module.meta")
+        notifier.enqueueModuleChanged(accountId, device1, device1, "eu.darken.octi.module.wifi")
+        notifier.enqueueModuleChanged(accountId, device1, device1, "eu.darken.octi.module.apps")
 
         // Despite multiple cancellations, all events should arrive in one batch
         val payload = withTimeout(3000) { session.outbox.receive() }
@@ -186,7 +186,7 @@ class SyncNotifierTest {
         repeat(64) { i -> session.outbox.trySend("filler-$i") }
 
         // Trigger a notification — trySend will fail (buffer full)
-        notifier.enqueueModuleChanged(accountId, device1, "eu.darken.octi.module.power")
+        notifier.enqueueModuleChanged(accountId, device1, device1, "eu.darken.octi.module.power")
         Thread.sleep(1500)
 
         // Session outbox should still be open (not disconnected)
@@ -204,7 +204,7 @@ class SyncNotifierTest {
         session.outbox.close()
 
         // Trigger a notification — trySend will fail (closed)
-        notifier.enqueueModuleChanged(accountId, device1, "eu.darken.octi.module.power")
+        notifier.enqueueModuleChanged(accountId, device1, device1, "eu.darken.octi.module.power")
         Thread.sleep(1500)
 
         // Should complete without exceptions — closed session is just skipped
