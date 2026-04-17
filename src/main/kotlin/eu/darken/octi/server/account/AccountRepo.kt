@@ -1,5 +1,3 @@
-@file:OptIn(ExperimentalPathApi::class)
-
 package eu.darken.octi.server.account
 
 import eu.darken.octi.server.App
@@ -23,7 +21,6 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.io.path.*
 
-@OptIn(ExperimentalPathApi::class)
 @Singleton
 class AccountRepo @Inject constructor(
     private val config: App.Config,

@@ -21,7 +21,6 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.io.path.*
 
-@OptIn(ExperimentalPathApi::class)
 @Singleton
 class DeviceRepo @Inject constructor(
     appScope: AppScope,

@@ -23,10 +23,8 @@ import org.junit.jupiter.api.Test
 import java.nio.file.Files
 import java.util.*
 import kotlin.concurrent.thread
-import kotlin.io.path.ExperimentalPathApi
 import kotlin.io.path.deleteRecursively
 
-@OptIn(ExperimentalPathApi::class)
 class WsFlowTest : TestRunner() {
 
     /** Like runTest2 but uses runBlocking — WebSocket tests need real time, not virtual time */

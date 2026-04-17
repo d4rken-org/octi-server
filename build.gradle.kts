@@ -51,6 +51,12 @@ application {
     mainClass.set("eu.darken.octi.server.App")
 }
 
+kotlin {
+    compilerOptions {
+        freeCompilerArgs.add("-opt-in=kotlin.io.path.ExperimentalPathApi")
+    }
+}
+
 tasks.register("generateBuildInfo") {
     doLast {
         val gitSHA = try {

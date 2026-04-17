@@ -15,7 +15,6 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.io.path.*
 
-@OptIn(ExperimentalPathApi::class)
 @Singleton
 class StartupRecoveryService @Inject constructor(
     private val config: App.Config,

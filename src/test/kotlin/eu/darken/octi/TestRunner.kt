@@ -15,11 +15,9 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.*
 import kotlin.concurrent.thread
-import kotlin.io.path.ExperimentalPathApi
 import kotlin.io.path.Path
 import kotlin.io.path.deleteRecursively
 
-@OptIn(ExperimentalPathApi::class)
 abstract class TestRunner {
 
     val baseConfig = App.Config(
