@@ -19,6 +19,7 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.io.path.*
@@ -32,6 +33,17 @@ class ModuleRepo @Inject constructor(
     private val sessionRepo: dagger.Lazy<UploadSessionRepo>,
 ) {
 
+    /**
+     * In-memory shadow of per-module access times. Reads update the shadow unconditionally;
+     * the disk `access.json` is written only when the last disk write is older than
+     * [ACCESS_DEBOUNCE]. This absorbs the ~5–8 writes/min/module that blob downloads and
+     * module reads would otherwise generate. The GC loop flushes pending shadow entries
+     * before computing staleness, and reads prefer the shadow over disk.
+     */
+    private data class AccessState(val lastAccessedAt: Instant, val lastPersistedAt: Instant)
+
+    private val accessShadow = ConcurrentHashMap<Path, AccessState>()
+
     init {
         appScope.launch(Dispatchers.IO) {
             delay(config.moduleGCInterval.toMillis() / 10)
@@ -41,11 +53,13 @@ class ModuleRepo @Inject constructor(
                         try {
                             if (!device.modulesPath.exists()) return@withLock
 
+                            flushPendingAccessWrites(device.modulesPath)
+
                             val now = Instant.now()
                             val staleModules = device.modulesPath.listDirectoryEntries().filter { path ->
-                                // Session-only directory (no module.json, no access.json) — skip, session GC handles it
                                 val metaFile = path.resolve(META_FILENAME)
                                 val accessFile = path.resolve(ACCESS_FILENAME)
+                                // Session-only directory (no module.json, no access.json) — skip, session GC handles it
                                 if (!metaFile.exists() && !accessFile.exists()) {
                                     return@filter false
                                 }
@@ -56,32 +70,16 @@ class ModuleRepo @Inject constructor(
                                     return@filter false
                                 }
 
-                                val lastAccessed = if (accessFile.exists()) {
-                                    try {
-                                        val access = serializer.decodeFromString<AccessMeta>(accessFile.readText())
-                                        access.lastAccessedAt
-                                    } catch (e: Exception) {
-                                        log(TAG, WARN) { "Failed to read $ACCESS_FILENAME for $path, falling back to mtime: ${e.message}" }
-                                        try {
-                                            metaFile.getLastModifiedTime().toInstant()
-                                        } catch (e2: Exception) {
-                                            log(TAG, WARN) { "Failed to read mtime for $metaFile, skipping: ${e2.message}" }
-                                            return@filter false
-                                        }
-                                    }
-                                } else {
-                                    try {
-                                        metaFile.getLastModifiedTime().toInstant()
-                                    } catch (e: Exception) {
-                                        log(TAG, WARN) { "Failed to read mtime for $metaFile, skipping: ${e.message}" }
-                                        return@filter false
-                                    }
-                                }
+                                val lastAccessed = readEffectiveAccessTime(path, metaFile, accessFile)
+                                    ?: return@filter false
                                 Duration.between(lastAccessed, now) > config.moduleExpiration
                             }
                             if (staleModules.isNotEmpty()) {
                                 log(TAG) { "Deleting ${staleModules.size} stale modules for ${device.id}" }
-                                staleModules.forEach { it.deleteRecursively() }
+                                staleModules.forEach {
+                                    accessShadow.remove(it)
+                                    it.deleteRecursively()
+                                }
                             }
                         } catch (e: IOException) {
                             log(TAG, ERROR) { "Module expiration check failed for $device\n${e.asLog()}" }
@@ -89,6 +87,41 @@ class ModuleRepo @Inject constructor(
                     }
                 }
                 delay(config.moduleGCInterval.toMillis())
+            }
+        }
+    }
+
+    /**
+     * Effective last-access time for a module. Shadow (in-memory) is authoritative if present —
+     * it is always at least as fresh as disk. Falls back to `access.json` on disk, then to
+     * `module.json` mtime, then null if nothing readable.
+     */
+    private fun readEffectiveAccessTime(modulePath: Path, metaFile: Path, accessFile: Path): Instant? {
+        accessShadow[modulePath]?.let { return it.lastAccessedAt }
+        if (accessFile.exists()) {
+            try {
+                return serializer.decodeFromString<AccessMeta>(accessFile.readText()).lastAccessedAt
+            } catch (e: Exception) {
+                log(TAG, WARN) { "Failed to read $ACCESS_FILENAME for $modulePath, falling back to mtime: ${e.message}" }
+            }
+        }
+        return try {
+            metaFile.getLastModifiedTime().toInstant()
+        } catch (e: Exception) {
+            log(TAG, WARN) { "Failed to read mtime for $metaFile, skipping: ${e.message}" }
+            null
+        }
+    }
+
+    /**
+     * Persists any pending shadow access times under the given `modulesPath`. Called by the GC
+     * loop so that staleness computation and disk state don't diverge beyond one GC tick.
+     */
+    private fun flushPendingAccessWrites(modulesPath: Path) {
+        for ((path, state) in accessShadow) {
+            if (!path.startsWith(modulesPath)) continue
+            if (state.lastAccessedAt > state.lastPersistedAt) {
+                persistAccessMeta(path, state.lastAccessedAt)
             }
         }
     }
@@ -207,14 +240,34 @@ class ModuleRepo @Inject constructor(
 
     /**
      * Updates the access timestamp for a module. Called on blob reads/lists.
+     * Coalesces disk writes via [recordAccess].
      */
     fun touchAccess(target: Device, moduleId: ModuleId) {
         val modulePath = target.getModulePath(moduleId)
         if (modulePath.exists()) {
-            persistAccessMeta(modulePath, Instant.now())
+            recordAccess(modulePath, Instant.now())
         }
     }
 
+    /**
+     * Records an access on a module. Always updates the in-memory shadow; persists to disk only
+     * if the last disk write is older than [ACCESS_DEBOUNCE]. The GC loop flushes any pending
+     * shadow writes so disk-divergence is bounded by one GC tick.
+     */
+    private fun recordAccess(modulePath: Path, now: Instant) {
+        val prev = accessShadow[modulePath]
+        if (prev == null || Duration.between(prev.lastPersistedAt, now) >= ACCESS_DEBOUNCE) {
+            persistAccessMeta(modulePath, now)
+        } else {
+            accessShadow[modulePath] = prev.copy(lastAccessedAt = now)
+        }
+    }
+
+    /**
+     * Writes `access.json` immediately and refreshes the shadow so it tracks the disk state.
+     * Used for write paths (legacy POST, PUT commit) where we want consistent on-disk metadata
+     * alongside other module writes, and by [recordAccess] when the debounce has elapsed.
+     */
     private fun persistAccessMeta(modulePath: Path, accessTime: Instant) {
         try {
             val accessFile = modulePath.resolve(ACCESS_FILENAME)
@@ -222,6 +275,7 @@ class ModuleRepo @Inject constructor(
             val accessMeta = AccessMeta(lastAccessedAt = accessTime)
             tempFile.writeText(serializer.encodeToString(accessMeta))
             tempFile.moveTo(accessFile, overwrite = true)
+            accessShadow[modulePath] = AccessState(lastAccessedAt = accessTime, lastPersistedAt = accessTime)
         } catch (e: Exception) {
             log(TAG, WARN) { "Failed to persist $ACCESS_FILENAME for $modulePath: ${e.message}" }
         }
@@ -248,7 +302,7 @@ class ModuleRepo @Inject constructor(
                 } else {
                     val blobFile = modulePath.resolve(BLOB_FILENAME)
                     val payload = if (blobFile.exists()) blobFile.readBytes() else ByteArray(0)
-                    persistAccessMeta(modulePath, Instant.now())
+                    recordAccess(modulePath, Instant.now())
                     Module.Read(
                         modifiedAt = meta.modifiedAt,
                         payload = payload,
@@ -286,7 +340,7 @@ class ModuleRepo @Inject constructor(
                     } else {
                         null
                     }
-                    persistAccessMeta(modulePath, Instant.now())
+                    recordAccess(modulePath, Instant.now())
                     Module.ReadRef(
                         modifiedAt = meta.modifiedAt,
                         blobStream = blobStream,
@@ -361,6 +415,7 @@ class ModuleRepo @Inject constructor(
                 log(TAG) { "delete(${caller.id.shortId()}, ${target.id.shortId()}, $moduleId): didn't exist" }
                 return
             }
+            accessShadow.remove(modulePath)
             modulePath.deleteRecursively()
             log(TAG) { "delete(${caller.id.shortId()}, ${target.id.shortId()}, $moduleId): deleted" }
         }
@@ -371,6 +426,7 @@ class ModuleRepo @Inject constructor(
         targets.forEach { target ->
             target.sync.withLock {
                 if (target.modulesPath.exists()) {
+                    accessShadow.keys.removeAll { it.startsWith(target.modulesPath) }
                     target.modulesPath.deleteRecursively()
                 }
             }
@@ -419,6 +475,7 @@ class ModuleRepo @Inject constructor(
     fun deleteUnlocked(target: Device, moduleId: ModuleId) {
         val modulePath = target.getModulePath(moduleId)
         if (modulePath.exists()) {
+            accessShadow.remove(modulePath)
             modulePath.deleteRecursively()
             log(TAG, VERBOSE) { "deleteUnlocked(${target.id.shortId()}, $moduleId): deleted" }
         }
@@ -430,6 +487,7 @@ class ModuleRepo @Inject constructor(
      */
     fun clearUnlocked(target: Device) {
         if (target.modulesPath.exists()) {
+            accessShadow.keys.removeAll { it.startsWith(target.modulesPath) }
             target.modulesPath.deleteRecursively()
             log(TAG, VERBOSE) { "clearUnlocked(${target.id.shortId()}): wiped" }
         }
@@ -497,6 +555,7 @@ class ModuleRepo @Inject constructor(
         internal const val META_FILENAME = "module.json"
         internal const val BLOB_FILENAME = "payload.blob"
         internal const val ACCESS_FILENAME = "access.json"
+        private val ACCESS_DEBOUNCE: Duration = Duration.ofSeconds(30)
         private val TAG = logTag("Module", "Repo")
 
         /**

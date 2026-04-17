@@ -73,6 +73,12 @@ class ModuleLifecycleService @Inject constructor(
     /**
      * Legacy DELETE — under device lock, loads meta, computes total bytes, deletes,
      * adjusts quota, aborts scoped sessions.
+     *
+     * Unlike [legacyWrite], this deliberately does **not** reject blob-backed modules:
+     * DELETE is an explicit, unambiguous request to remove a module and everything it
+     * references. A client that understands blobs and wants to drop one without losing
+     * the rest must use PUT commit with an updated `blobRefs` list instead. Clients that
+     * don't understand blobs still need an escape hatch to wipe a module outright.
      */
     suspend fun legacyDelete(
         caller: Device,
@@ -122,7 +128,16 @@ class ModuleLifecycleService @Inject constructor(
             }
             if (error != null) return@withLock CommitResult.PreconditionFailed(error) to emptyList<Path>()
 
-            // Resolve blob refs
+            val modulePath = moduleRepo.resolveModulePath(target, moduleId)
+
+            // Ensure directory exists so new blobs can be moved in place during resolution.
+            modulePath.apply {
+                if (!parent.exists()) parent.createDirectory()
+                if (!exists()) createDirectory()
+            }
+
+            // Resolve blob refs and move new blobs into the live dir in one pass. One session-map
+            // scan per new blob instead of two (previously: meta lookup + file lookup).
             val newBlobRefs = mutableListOf<BlobRef>()
             for (blobId in blobRefIds) {
                 val existingRef = existingMeta?.blobRefs?.find { it.blobId == blobId }
@@ -130,8 +145,14 @@ class ModuleLifecycleService @Inject constructor(
                     newBlobRefs.add(existingRef)
                     continue
                 }
-                val sessionMeta = sessionRepo.getCompletedSessionByBlobId(blobId, caller.accountId, target.id, moduleId)
-                    ?: return@withLock CommitResult.BadRequest("Referenced blobId not found: $blobId") to emptyList<Path>()
+                val consumed = sessionRepo.consumeCompletedBlob(blobId, caller.accountId, target.id, moduleId)
+                val (sessionMeta, sessionBlobFile) = when (consumed) {
+                    is UploadSessionRepo.ConsumeResult.Ready -> consumed.meta to consumed.file
+                    UploadSessionRepo.ConsumeResult.SessionNotFound ->
+                        return@withLock CommitResult.BadRequest("Referenced blobId not found: $blobId") to emptyList<Path>()
+                    UploadSessionRepo.ConsumeResult.PayloadMissing ->
+                        return@withLock CommitResult.BadRequest("Staged blob payload missing for $blobId") to emptyList<Path>()
+                }
                 newBlobRefs.add(
                     BlobRef(
                         blobId = sessionMeta.blobId,
@@ -141,27 +162,10 @@ class ModuleLifecycleService @Inject constructor(
                         hashHex = sessionMeta.hashHex,
                     )
                 )
-            }
-
-            val modulePath = moduleRepo.resolveModulePath(target, moduleId)
-
-            // Ensure directory exists
-            modulePath.apply {
-                if (!parent.exists()) parent.createDirectory()
-                if (!exists()) createDirectory()
-            }
-
-            // Move finalized blobs from sessions/ to blobs/
-            for (ref in newBlobRefs) {
-                val isNewBlob = existingMeta?.blobRefs?.any { it.blobId == ref.blobId } != true
-                if (isNewBlob) {
-                    val sessionBlobFile = sessionRepo.getCompletedBlobFileByBlobId(ref.blobId, caller.accountId, target.id, moduleId)
-                        ?: return@withLock CommitResult.BadRequest("Staged blob payload missing for ${ref.blobId}") to emptyList<Path>()
-                    val prefix = ref.storageKey.take(4)
-                    val liveBlobDir = modulePath.resolve("blobs").resolve(prefix).resolve(ref.storageKey)
-                    liveBlobDir.createDirectories()
-                    sessionBlobFile.toPath().moveTo(liveBlobDir.resolve("payload.blob"), overwrite = true)
-                }
+                val prefix = sessionMeta.storageKey.take(4)
+                val liveBlobDir = modulePath.resolve("blobs").resolve(prefix).resolve(sessionMeta.storageKey)
+                liveBlobDir.createDirectories()
+                sessionBlobFile.toPath().moveTo(liveBlobDir.resolve("payload.blob"), overwrite = true)
             }
 
             // Write payload.blob first, then module.json as commit point

@@ -378,26 +378,29 @@ class UploadSessionRepo @Inject constructor(
 
     // region Lookups (scoped)
 
-    fun getCompletedSessionByBlobId(blobId: String, accountId: AccountId, deviceId: DeviceId, moduleId: ModuleId): UploadSessionMeta? {
-        return sessions.values
-            .firstOrNull {
-                it.meta.blobId == blobId
-                    && it.meta.state == UploadSessionMeta.State.COMPLETE
-                    && it.meta.matchesScopeWithDevice(accountId, deviceId, moduleId)
-            }
-            ?.meta
+    sealed interface ConsumeResult {
+        data class Ready(val meta: UploadSessionMeta, val file: java.io.File) : ConsumeResult
+        data object SessionNotFound : ConsumeResult
+        data object PayloadMissing : ConsumeResult
     }
 
-    fun getCompletedBlobFileByBlobId(blobId: String, accountId: AccountId, deviceId: DeviceId, moduleId: ModuleId): java.io.File? {
+    /**
+     * Atomically resolves a COMPLETE upload session scoped to this account/device/module and
+     * verifies its staged payload file still exists. Returned [ConsumeResult.Ready] holds both the
+     * session metadata (for building the live [BlobRef]) and the on-disk file (to be moved into
+     * the module's live blob directory).
+     */
+    fun consumeCompletedBlob(blobId: String, accountId: AccountId, deviceId: DeviceId, moduleId: ModuleId): ConsumeResult {
         val state = sessions.values
             .firstOrNull {
                 it.meta.blobId == blobId
                     && it.meta.state == UploadSessionMeta.State.COMPLETE
                     && it.meta.matchesScopeWithDevice(accountId, deviceId, moduleId)
             }
-            ?: return null
+            ?: return ConsumeResult.SessionNotFound
         val blobFile = state.sessionDir.resolve(BLOB_FILENAME)
-        return if (blobFile.exists()) blobFile.toFile() else null
+        if (!blobFile.exists()) return ConsumeResult.PayloadMissing
+        return ConsumeResult.Ready(meta = state.meta, file = blobFile.toFile())
     }
 
     fun removeCommittedSessionByBlobId(blobId: String) {

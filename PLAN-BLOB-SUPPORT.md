@@ -137,6 +137,7 @@ Migration is lazy and per targeted module instance `(accountId, targetDeviceId, 
 - legacy `GET` on existing modules returns `200` raw bytes plus `X-Modified-At`
 - legacy `POST` remains allowed only while the targeted module instance has zero live `blobRefs`
 - legacy `POST` returns `409 Conflict` when the targeted module instance is blob-backed
+- legacy `DELETE` deliberately does **not** reject blob-backed modules — DELETE is an unambiguous intent to remove the module and everything it references (including live blobs and staged sessions). Clients that want to drop a single blob while keeping the rest must use `PUT` commit with an updated `blobRefs` list; legacy-only clients still need an escape hatch to wipe a module outright.
 - new `PUT` on an existing module instance requires a matching `If-Match` `ETag`
 - new `PUT` create-on-absent semantics require `If-None-Match: *`
 - new `PUT` with `If-None-Match: *` returns `412 Precondition Failed` if the module already exists
