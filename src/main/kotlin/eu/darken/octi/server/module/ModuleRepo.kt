@@ -113,12 +113,8 @@ class ModuleRepo @Inject constructor(
         }
     }
 
-    private fun Device.getModulePath(moduleId: ModuleId): Path {
-        val digest = MessageDigest.getInstance("SHA-1")
-        val hashBytes = digest.digest(moduleId.toByteArray())
-        val safeName = hashBytes.joinToString("") { "%02x".format(it) }
-        return modulesPath.resolve(safeName)
-    }
+    private fun Device.getModulePath(moduleId: ModuleId): Path =
+        modulesPath.resolve(moduleId.toModuleDirName())
 
     /**
      * Loads or synthesizes schema v1 [ModuleMeta] from disk.

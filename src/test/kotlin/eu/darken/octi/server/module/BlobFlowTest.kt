@@ -10,7 +10,6 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import kotlinx.serialization.Serializable
 import org.junit.jupiter.api.Test
-import java.security.MessageDigest
 import java.util.*
 
 class BlobFlowTest : TestRunner() {
@@ -47,11 +46,6 @@ class BlobFlowTest : TestRunner() {
         val hashAlgorithm: String? = null,
         val hashHex: String? = null,
     )
-
-    private fun sha256Hex(data: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        return digest.digest(data).joinToString("") { "%02x".format(it) }
-    }
 
     private fun base64Encode(data: ByteArray): String {
         return Base64.getEncoder().encodeToString(data)
@@ -118,7 +112,7 @@ class BlobFlowTest : TestRunner() {
 
         // Create blob data
         val blobData = "hello-blob-content".toByteArray()
-        val blobHash = sha256Hex(blobData)
+        val blobHash = blobData.sha256Hex()
 
         // 1. Create session
         val session = http.post("/v1/module/$testModuleId/blob-sessions") {
@@ -386,7 +380,7 @@ class BlobFlowTest : TestRunner() {
         val creds = createDevice()
         writeModule(creds, testModuleId, data = "init")
 
-        val emptyHash = sha256Hex(ByteArray(0))
+        val emptyHash = ByteArray(0).sha256Hex()
 
         val session = http.post("/v1/module/$testModuleId/blob-sessions") {
             url { parameters.append("device-id", creds.deviceId.toString()) }
@@ -416,7 +410,7 @@ class BlobFlowTest : TestRunner() {
         val chunk1 = ByteArray(4096) { (it and 0xFF).toByte() }
         val chunk2 = ByteArray(4096) { ((it + 128) and 0xFF).toByte() }
         val fullBlob = chunk1 + chunk2
-        val blobHash = sha256Hex(fullBlob)
+        val blobHash = fullBlob.sha256Hex()
 
         val session = http.post("/v1/module/$testModuleId/blob-sessions") {
             url { parameters.append("device-id", creds.deviceId.toString()) }
@@ -536,7 +530,7 @@ class BlobFlowTest : TestRunner() {
         val initEtag = createResp.headers["ETag"]!!.trim('"')
 
         val blobData = "alice-secret".toByteArray()
-        val blobHash = sha256Hex(blobData)
+        val blobHash = blobData.sha256Hex()
         val session = http.post("/v1/module/$testModuleId/blob-sessions") {
             url { parameters.append("device-id", alice.deviceId.toString()) }
             addCredentials(alice)
@@ -615,7 +609,7 @@ class BlobFlowTest : TestRunner() {
         writeModule(creds, testModuleId, data = "init")
 
         val blobData = "idem-test".toByteArray()
-        val blobHash = sha256Hex(blobData)
+        val blobHash = blobData.sha256Hex()
 
         val session = http.post("/v1/module/$testModuleId/blob-sessions") {
             url { parameters.append("device-id", creds.deviceId.toString()) }

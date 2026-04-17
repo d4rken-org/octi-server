@@ -123,7 +123,7 @@ class UploadSessionRepo @Inject constructor(
         val storageKey = UUID.randomUUID().toString()
         val now = Instant.now()
 
-        val moduleHash = sha1Hex(moduleId)
+        val moduleHash = moduleId.toModuleDirName()
         val sessionDir = config.dataPath
             .resolve("accounts").resolve(accountId.toString())
             .resolve("devices").resolve(deviceId.toString())
@@ -442,11 +442,6 @@ class UploadSessionRepo @Inject constructor(
             }
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
-    }
-
-    private fun sha1Hex(input: String): String {
-        val digest = MessageDigest.getInstance("SHA-1")
-        return digest.digest(input.toByteArray()).joinToString("") { "%02x".format(it) }
     }
 
     // endregion

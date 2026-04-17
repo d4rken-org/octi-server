@@ -8,23 +8,17 @@ import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import org.junit.jupiter.api.Test
-import java.security.MessageDigest
 import kotlin.io.path.*
 
 class ModuleMigrationTest : TestRunner() {
 
     private val testModuleId = "eu.darken.octi.module.test"
 
-    private fun sha1Hex(input: String): String {
-        val digest = MessageDigest.getInstance("SHA-1")
-        return digest.digest(input.toByteArray()).joinToString("") { "%02x".format(it) }
-    }
-
     @Test
     fun `legacy module with valid module json is migrated on first read`() = runTest2 {
         val creds = createDevice()
         val modulesPath = getModulesPath(creds)
-        val moduleDir = modulesPath.resolve(sha1Hex(testModuleId))
+        val moduleDir = modulesPath.resolve(testModuleId.toModuleDirName())
 
         // Seed legacy fixture on disk
         moduleDir.createDirectories()
@@ -55,7 +49,7 @@ class ModuleMigrationTest : TestRunner() {
     fun `legacy module payload blob is not modified during migration`() = runTest2 {
         val creds = createDevice()
         val modulesPath = getModulesPath(creds)
-        val moduleDir = modulesPath.resolve(sha1Hex(testModuleId))
+        val moduleDir = modulesPath.resolve(testModuleId.toModuleDirName())
 
         val originalPayload = "original-encrypted-payload-bytes".toByteArray()
         moduleDir.createDirectories()
@@ -75,7 +69,7 @@ class ModuleMigrationTest : TestRunner() {
     fun `synthesized etag is deterministic across reads`() = runTest2 {
         val creds = createDevice()
         val modulesPath = getModulesPath(creds)
-        val moduleDir = modulesPath.resolve(sha1Hex(testModuleId))
+        val moduleDir = modulesPath.resolve(testModuleId.toModuleDirName())
 
         moduleDir.createDirectories()
         moduleDir.resolve("payload.blob").writeBytes("test-data".toByteArray())
@@ -92,7 +86,7 @@ class ModuleMigrationTest : TestRunner() {
     fun `missing module json with present payload blob recovers`() = runTest2 {
         val creds = createDevice()
         val modulesPath = getModulesPath(creds)
-        val moduleDir = modulesPath.resolve(sha1Hex(testModuleId))
+        val moduleDir = modulesPath.resolve(testModuleId.toModuleDirName())
 
         // Only payload.blob, no module.json
         moduleDir.createDirectories()
@@ -112,7 +106,7 @@ class ModuleMigrationTest : TestRunner() {
     fun `malformed module json with present payload blob recovers`() = runTest2 {
         val creds = createDevice()
         val modulesPath = getModulesPath(creds)
-        val moduleDir = modulesPath.resolve(sha1Hex(testModuleId))
+        val moduleDir = modulesPath.resolve(testModuleId.toModuleDirName())
 
         moduleDir.createDirectories()
         moduleDir.resolve("payload.blob").writeBytes("recover-me".toByteArray())
@@ -139,7 +133,7 @@ class ModuleMigrationTest : TestRunner() {
     fun `legacy module remains writable through legacy POST after migration`() = runTest2 {
         val creds = createDevice()
         val modulesPath = getModulesPath(creds)
-        val moduleDir = modulesPath.resolve(sha1Hex(testModuleId))
+        val moduleDir = modulesPath.resolve(testModuleId.toModuleDirName())
 
         // Seed legacy fixture
         moduleDir.createDirectories()
@@ -181,7 +175,7 @@ class ModuleMigrationTest : TestRunner() {
     fun `migration creates correct documentSizeBytes`() = runTest2 {
         val creds = createDevice()
         val modulesPath = getModulesPath(creds)
-        val moduleDir = modulesPath.resolve(sha1Hex(testModuleId))
+        val moduleDir = modulesPath.resolve(testModuleId.toModuleDirName())
 
         val payload = "twelve chars"
         moduleDir.createDirectories()

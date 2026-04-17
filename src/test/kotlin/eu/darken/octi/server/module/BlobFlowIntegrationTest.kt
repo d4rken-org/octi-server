@@ -5,6 +5,7 @@ import eu.darken.octi.TestRunner
 import eu.darken.octi.addCredentials
 import eu.darken.octi.createDevice
 import eu.darken.octi.readModuleRaw
+import eu.darken.octi.sha256Hex
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.string.shouldNotBeEmpty
@@ -30,7 +31,6 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.io.readByteArray
 import kotlinx.serialization.Serializable
 import org.junit.jupiter.api.Test
-import java.security.MessageDigest
 import java.util.Base64
 
 /**
@@ -70,11 +70,6 @@ class BlobFlowIntegrationTest : TestRunner() {
         val hashHex: String? = null,
     )
 
-    private fun sha256Hex(data: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        return digest.digest(data).joinToString("") { "%02x".format(it) }
-    }
-
     private fun base64Encode(data: ByteArray): String =
         Base64.getEncoder().encodeToString(data)
 
@@ -84,7 +79,7 @@ class BlobFlowIntegrationTest : TestRunner() {
         moduleId: String,
         payload: ByteArray,
     ): SessionInfo {
-        val hash = sha256Hex(payload)
+        val hash = payload.sha256Hex()
         val session = http.post("/v1/module/$moduleId/blob-sessions") {
             url { parameters.append("device-id", targetDeviceId.toString()) }
             addCredentials(creds)
@@ -163,7 +158,7 @@ class BlobFlowIntegrationTest : TestRunner() {
         peerList.blobs.size shouldBe 1
         peerList.blobs[0].blobId shouldBe session.blobId
         peerList.blobs[0].sizeBytes shouldBe blobPayload.size.toLong()
-        peerList.blobs[0].hashHex shouldBe sha256Hex(blobPayload)
+        peerList.blobs[0].hashHex shouldBe blobPayload.sha256Hex()
 
         http.get("/v1/module/$testModuleId/blobs/${session.blobId}") {
             url { parameters.append("device-id", ownerCreds.deviceId.toString()) }
@@ -172,7 +167,7 @@ class BlobFlowIntegrationTest : TestRunner() {
             status shouldBe HttpStatusCode.OK
             val received = body<ByteArray>()
             received.contentEquals(blobPayload) shouldBe true
-            sha256Hex(received) shouldBe sha256Hex(blobPayload)
+            received.sha256Hex() shouldBe blobPayload.sha256Hex()
         }
     }
 
