@@ -494,6 +494,55 @@ class ModuleRepo @Inject constructor(
     }
 
     /**
+     * Remove a single blobRef from module metadata. Caller must hold target.sync.
+     * Validates If-Match against the current module etag. On success, returns the
+     * removed ref plus the orphan blob directory path for async cleanup and the
+     * new metadata. Sets sourceDeviceId = caller.id and advances etag/modifiedAt.
+     *
+     * If duplicate rows for the same blobId exist (post-recovery corruption),
+     * remove exactly one and log a warning; the next DELETE reaps the duplicate.
+     */
+    fun removeBlobRefUnlocked(
+        caller: Device,
+        target: Device,
+        moduleId: ModuleId,
+        blobId: String,
+        ifMatch: String,
+    ): RemoveBlobRefResult {
+        val modulePath = target.getModulePath(moduleId)
+        val oldMeta = loadOrMigrateMeta(modulePath, moduleId)
+            ?: return RemoveBlobRefResult.ModuleNotFound
+
+        if (oldMeta.etag != ifMatch) {
+            return RemoveBlobRefResult.EtagMismatch(currentEtag = oldMeta.etag)
+        }
+
+        val firstIndex = oldMeta.blobRefs.indexOfFirst { it.blobId == blobId }
+        if (firstIndex < 0) return RemoveBlobRefResult.BlobNotFound
+
+        val removed = oldMeta.blobRefs[firstIndex]
+        val duplicateCount = oldMeta.blobRefs.count { it.blobId == blobId } - 1
+        if (duplicateCount > 0) {
+            log(TAG, WARN) { "removeBlobRefUnlocked: $moduleId has $duplicateCount duplicate blobRefs for $blobId; removing only first" }
+        }
+
+        val newRefs = oldMeta.blobRefs.toMutableList().also { it.removeAt(firstIndex) }
+        val now = Instant.now()
+        val newMeta = oldMeta.copy(
+            sourceDeviceId = caller.id,
+            etag = generateRandomEtag(),
+            modifiedAt = now,
+            blobRefs = newRefs,
+        )
+        persistMeta(modulePath, newMeta)
+        persistAccessMeta(modulePath, now)
+
+        val prefix = removed.storageKey.take(4)
+        val orphanPath = modulePath.resolve("blobs").resolve(prefix).resolve(removed.storageKey)
+        return RemoveBlobRefResult.Success(RemovedBlobRef(removed, orphanPath, newMeta))
+    }
+
+    /**
      * Loads metadata for an existing module. Returns null if the module doesn't exist.
      * Triggers lazy migration if metadata is legacy format.
      * Must be called under the device sync lock.
@@ -581,6 +630,23 @@ class ModuleRepo @Inject constructor(
 
 class BlobBackedModuleException(val moduleId: ModuleId) :
     RuntimeException("Legacy write rejected: module $moduleId has external blob refs")
+
+/**
+ * Returned by [ModuleRepo.removeBlobRefUnlocked] on success; carries the removed ref,
+ * the orphan blob directory path for async cleanup, and the new module metadata.
+ */
+data class RemovedBlobRef(
+    val blobRef: BlobRef,
+    val orphanPath: Path,
+    val newMeta: ModuleMeta,
+)
+
+sealed interface RemoveBlobRefResult {
+    data class Success(val removed: RemovedBlobRef) : RemoveBlobRefResult
+    data object ModuleNotFound : RemoveBlobRefResult
+    data object BlobNotFound : RemoveBlobRefResult
+    data class EtagMismatch(val currentEtag: String) : RemoveBlobRefResult
+}
 
 /**
  * Already-open handle to a live blob. Caller owns [stream] and must close it.

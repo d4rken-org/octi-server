@@ -11,6 +11,8 @@ import io.ktor.http.*
 import kotlinx.serialization.Serializable
 import org.junit.jupiter.api.Test
 import java.util.*
+import kotlin.io.path.exists
+import kotlin.io.path.readText
 
 class BlobFlowTest : TestRunner() {
 
@@ -601,6 +603,350 @@ class BlobFlowTest : TestRunner() {
             contentType(ContentType.Application.Json)
             setBody("{}")
         }.status shouldBe HttpStatusCode.NotFound
+    }
+
+    @Serializable
+    private data class DeleteBlobInfo(val etag: String = "")
+
+    @Serializable
+    private data class StorageInfo(
+        val usedBytes: Long = 0,
+        val reservedBytes: Long = 0,
+    )
+
+    private suspend fun TestEnvironment.commitBlob(
+        creds: Credentials,
+        moduleId: String,
+        blobData: ByteArray,
+        ifMatch: String,
+        rootDoc: ByteArray = "root".toByteArray(),
+    ): Pair<String, String> {
+        val blobHash = blobData.sha256Hex()
+        val session = http.post("/v1/module/$moduleId/blob-sessions") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            contentType(ContentType.Application.Json)
+            setBody("""{"sizeBytes": ${blobData.size}, "hashAlgorithm": "sha256", "hashHex": "$blobHash"}""")
+        }.body<SessionInfo>()
+        http.patch("/v1/module/$moduleId/blob-sessions/${session.sessionId}") {
+            addCredentials(creds)
+            header("Upload-Offset", "0")
+            contentType(ContentType.Application.OctetStream)
+            setBody(blobData)
+        }
+        http.post("/v1/module/$moduleId/blob-sessions/${session.sessionId}/finalize") {
+            addCredentials(creds)
+            contentType(ContentType.Application.Json)
+            setBody("{}")
+        }
+        // PUT commit is authoritative for blobRefs — preserve existing refs so sequential commits accumulate.
+        val existingIds = http.get("/v1/module/$moduleId/blobs") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+        }.body<BlobListInfo>().blobs.map { it.blobId }
+        val allIds = existingIds + session.blobId
+        val refsJson = allIds.joinToString(",") { """{"blobId": "$it"}""" }
+        val commitEtag = http.put("/v1/module/$moduleId") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header("If-Match", ifMatch)
+            contentType(ContentType.Application.Json)
+            setBody("""{"documentBase64": "${base64Encode(rootDoc)}", "blobRefs": [$refsJson]}""")
+        }.headers["ETag"]!!.trim('"')
+        return session.blobId to commitEtag
+    }
+
+    private suspend fun TestEnvironment.createModule(creds: Credentials, moduleId: String): String {
+        return http.put("/v1/module/$moduleId") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header("If-None-Match", "*")
+            contentType(ContentType.Application.Json)
+            setBody("""{"documentBase64": "${base64Encode("init".toByteArray())}", "blobRefs": []}""")
+        }.headers["ETag"]!!.trim('"')
+    }
+
+    private suspend fun TestEnvironment.getUsedBytes(creds: Credentials): Long =
+        http.get("/v1/account/storage") { addCredentials(creds) }.body<StorageInfo>().usedBytes
+
+    @Test
+    fun `delete blob drops quota and advances etag and cleans disk`() = runTest2 {
+        val creds = createDevice()
+        val moduleEtag1 = createModule(creds, testModuleId)
+        val blobData = "hello-blob-delete".toByteArray()
+        val (blobId, moduleEtag2) = commitBlob(creds, testModuleId, blobData, moduleEtag1)
+
+        // Locate the on-disk blob directory so we can verify async cleanup.
+        val moduleDir = getModulesPath(creds).resolve(testModuleId.toModuleDirName())
+        val storageKey = Regex(""""storageKey"\s*:\s*"([^"]+)"""")
+            .find(moduleDir.resolve("module.json").readText())!!
+            .groupValues[1]
+        val blobDir = moduleDir.resolve("blobs").resolve(storageKey.take(4)).resolve(storageKey)
+        blobDir.exists() shouldBe true
+
+        val usedBefore = getUsedBytes(creds)
+
+        val deleteResp = http.delete("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header("If-Match", moduleEtag2)
+        }
+        deleteResp.status shouldBe HttpStatusCode.OK
+        val newEtag = deleteResp.body<DeleteBlobInfo>().etag
+        newEtag.shouldNotBeEmpty()
+        newEtag shouldNotBe moduleEtag2
+        deleteResp.headers["ETag"]?.trim('"') shouldBe newEtag
+
+        getUsedBytes(creds) shouldBe (usedBefore - blobData.size.toLong())
+
+        http.get("/v1/module/$testModuleId/blobs") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+        }.apply {
+            status shouldBe HttpStatusCode.OK
+            val list = body<BlobListInfo>()
+            list.moduleEtag shouldBe newEtag
+            list.blobs shouldBe emptyList()
+        }
+
+        http.get("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+        }.status shouldBe HttpStatusCode.NotFound
+
+        // Async cleanup runs on AppScope(Dispatchers.IO); poll briefly for the dir to vanish.
+        var gone = false
+        repeat(30) {
+            if (!blobDir.exists()) { gone = true; return@repeat }
+            Thread.sleep(100)
+        }
+        gone shouldBe true
+    }
+
+    @Test
+    fun `delete blob retry returns 404 and does not double-subtract quota`() = runTest2 {
+        val creds = createDevice()
+        val moduleEtag1 = createModule(creds, testModuleId)
+        val (blobId, moduleEtag2) = commitBlob(creds, testModuleId, "retry-blob".toByteArray(), moduleEtag1)
+
+        val firstResp = http.delete("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header("If-Match", moduleEtag2)
+        }
+        firstResp.status shouldBe HttpStatusCode.OK
+        val afterFirst = getUsedBytes(creds)
+        val newEtag = firstResp.body<DeleteBlobInfo>().etag
+
+        http.delete("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header("If-Match", newEtag)
+        }.status shouldBe HttpStatusCode.NotFound
+
+        getUsedBytes(creds) shouldBe afterFirst
+    }
+
+    @Test
+    fun `delete blob with stale If-Match returns 412 with current etag`() = runTest2 {
+        val creds = createDevice()
+        val moduleEtag1 = createModule(creds, testModuleId)
+        val (blobId, moduleEtag2) = commitBlob(creds, testModuleId, "stale-test".toByteArray(), moduleEtag1)
+
+        val staleResp = http.delete("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header("If-Match", moduleEtag1)
+        }
+        staleResp.status shouldBe HttpStatusCode.PreconditionFailed
+        // Server should hint the current etag so clients can retry without a separate GET.
+        staleResp.headers["ETag"]?.trim('"') shouldBe moduleEtag2
+
+        http.get("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+        }.status shouldBe HttpStatusCode.OK
+    }
+
+    @Test
+    fun `delete blob from peer device in same account`() = runTest2 {
+        val alice = createDevice()
+        val bob = createDevice(alice) // bob joins alice's account via share code
+        val moduleEtag1 = createModule(alice, testModuleId)
+        val blobData = "peer-delete".toByteArray()
+        val (blobId, moduleEtag2) = commitBlob(alice, testModuleId, blobData, moduleEtag1)
+
+        val usedBefore = getUsedBytes(alice)
+
+        // Bob targets Alice's device — same account, quota is shared.
+        val resp = http.delete("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", alice.deviceId.toString()) }
+            addCredentials(bob)
+            header("If-Match", moduleEtag2)
+        }
+        resp.status shouldBe HttpStatusCode.OK
+        resp.body<DeleteBlobInfo>().etag shouldNotBe moduleEtag2
+
+        getUsedBytes(alice) shouldBe (usedBefore - blobData.size.toLong())
+        getUsedBytes(bob) shouldBe (usedBefore - blobData.size.toLong())
+
+        http.get("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", alice.deviceId.toString()) }
+            addCredentials(alice)
+        }.status shouldBe HttpStatusCode.NotFound
+    }
+
+    @Test
+    fun `delete blob without If-Match returns 400`() = runTest2 {
+        val creds = createDevice()
+        val moduleEtag1 = createModule(creds, testModuleId)
+        val (blobId, _) = commitBlob(creds, testModuleId, "no-etag".toByteArray(), moduleEtag1)
+
+        http.delete("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+        }.status shouldBe HttpStatusCode.BadRequest
+    }
+
+    @Test
+    fun `delete blob with weak If-Match returns 400`() = runTest2 {
+        val creds = createDevice()
+        val moduleEtag1 = createModule(creds, testModuleId)
+        val (blobId, _) = commitBlob(creds, testModuleId, "weak-etag".toByteArray(), moduleEtag1)
+
+        http.delete("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header("If-Match", "W/\"whatever\"")
+        }.status shouldBe HttpStatusCode.BadRequest
+    }
+
+    @Test
+    fun `delete blob with wildcard If-Match returns 400`() = runTest2 {
+        val creds = createDevice()
+        val moduleEtag1 = createModule(creds, testModuleId)
+        val (blobId, _) = commitBlob(creds, testModuleId, "wildcard".toByteArray(), moduleEtag1)
+
+        http.delete("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header("If-Match", "*")
+        }.status shouldBe HttpStatusCode.BadRequest
+    }
+
+    @Test
+    fun `delete blob unknown blobId returns 404`() = runTest2 {
+        val creds = createDevice()
+        val moduleEtag1 = createModule(creds, testModuleId)
+        val (_, moduleEtag2) = commitBlob(creds, testModuleId, "any".toByteArray(), moduleEtag1)
+
+        http.delete("/v1/module/$testModuleId/blobs/${UUID.randomUUID()}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header("If-Match", moduleEtag2)
+        }.status shouldBe HttpStatusCode.NotFound
+    }
+
+    @Test
+    fun `delete blob on unknown module returns 404`() = runTest2 {
+        val creds = createDevice()
+
+        http.delete("/v1/module/$testModuleId/blobs/${UUID.randomUUID()}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header("If-Match", "whatever")
+        }.status shouldBe HttpStatusCode.NotFound
+    }
+
+    @Test
+    fun `delete blob cross-account denied`() = runTest2 {
+        val alice = createDevice()
+        val bob = createDevice()
+        val moduleEtag1 = createModule(alice, testModuleId)
+        val (blobId, moduleEtag2) = commitBlob(alice, testModuleId, "alice-secret".toByteArray(), moduleEtag1)
+
+        http.delete("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", alice.deviceId.toString()) }
+            addCredentials(bob)
+            header("If-Match", moduleEtag2)
+        }.status shouldBe HttpStatusCode.NotFound
+
+        http.get("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", alice.deviceId.toString()) }
+            addCredentials(alice)
+        }.status shouldBe HttpStatusCode.OK
+    }
+
+    @Test
+    fun `delete blob keeps other blobs intact`() = runTest2 {
+        val creds = createDevice()
+        var etag = createModule(creds, testModuleId)
+        val (idA, etagA) = commitBlob(creds, testModuleId, "AAA".toByteArray(), etag)
+        etag = etagA
+        val (idB, etagB) = commitBlob(creds, testModuleId, "BBBB".toByteArray(), etag)
+        etag = etagB
+        val (idC, etagC) = commitBlob(creds, testModuleId, "CCCCC".toByteArray(), etag)
+        etag = etagC
+
+        // Sanity: the third commit should keep A and B alongside C.
+        http.get("/v1/module/$testModuleId/blobs") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+        }.body<BlobListInfo>().blobs.map { it.blobId }.toSet() shouldBe setOf(idA, idB, idC)
+
+        val deleteResp = http.delete("/v1/module/$testModuleId/blobs/$idB") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header("If-Match", etag)
+        }
+        deleteResp.status shouldBe HttpStatusCode.OK
+        val etagAfter = deleteResp.body<DeleteBlobInfo>().etag
+
+        http.get("/v1/module/$testModuleId/blobs") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+        }.apply {
+            val list = body<BlobListInfo>()
+            list.moduleEtag shouldBe etagAfter
+            list.blobs.map { it.blobId }.toSet() shouldBe setOf(idA, idC)
+        }
+
+        http.get("/v1/module/$testModuleId/blobs/$idA") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+        }.readRawBytes() shouldBe "AAA".toByteArray()
+
+        http.get("/v1/module/$testModuleId/blobs/$idC") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+        }.readRawBytes() shouldBe "CCCCC".toByteArray()
+    }
+
+    @Test
+    fun `delete blob releases quota for immediate reuse`() = runTest2 {
+        val creds = createDevice()
+        val moduleEtag1 = createModule(creds, testModuleId)
+        val blob1 = ByteArray(4096) { it.toByte() }
+        val (blobId1, moduleEtag2) = commitBlob(creds, testModuleId, blob1, moduleEtag1)
+
+        // Delete the blob and immediately reserve a new session of the same size —
+        // only succeeds if the quota release happened synchronously inside the DELETE's lock.
+        val deleteResp = http.delete("/v1/module/$testModuleId/blobs/$blobId1") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header("If-Match", moduleEtag2)
+        }
+        deleteResp.status shouldBe HttpStatusCode.OK
+
+        http.post("/v1/module/$testModuleId/blob-sessions") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            contentType(ContentType.Application.Json)
+            setBody("""{"sizeBytes": ${blob1.size}}""")
+        }.apply {
+            status shouldBe HttpStatusCode.Created
+            body<SessionInfo>().state shouldBe "active"
+        }
     }
 
     @Test

@@ -10,6 +10,7 @@ import eu.darken.octi.server.common.debug.logging.logTag
 import eu.darken.octi.server.common.debug.logging.shortId
 import eu.darken.octi.server.device.Device
 import eu.darken.octi.server.device.DeviceId
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
@@ -38,6 +39,13 @@ class ModuleLifecycleService @Inject constructor(
         data class Success(val etag: String) : CommitResult
         data class PreconditionFailed(val message: String) : CommitResult
         data class BadRequest(val message: String) : CommitResult
+    }
+
+    sealed interface DeleteBlobResult {
+        data class Success(val newEtag: String, val removedSizeBytes: Long) : DeleteBlobResult
+        data object ModuleNotFound : DeleteBlobResult
+        data object BlobNotFound : DeleteBlobResult
+        data class EtagMismatch(val currentEtag: String) : DeleteBlobResult
     }
 
     /**
@@ -99,6 +107,53 @@ class ModuleLifecycleService @Inject constructor(
 
             sessionRepo.abortSessionsForModule(caller.accountId, target.id, moduleId)
         }
+    }
+
+    /**
+     * Single-blob delete — under device lock, validates If-Match, removes the blobRef,
+     * persists new metadata, releases quota. The on-disk blob directory is cleaned up
+     * asynchronously outside the lock; startup orphan sweep reclaims it if we crash.
+     *
+     * Staged upload sessions are untouched: their blobIds are distinct from committed
+     * ones and have their own expiry path.
+     */
+    suspend fun deleteBlob(
+        caller: Device,
+        target: Device,
+        moduleId: ModuleId,
+        blobId: String,
+        ifMatch: String,
+    ): DeleteBlobResult {
+        val (outcome, orphanPath) = target.sync.withLock {
+            when (val result = moduleRepo.removeBlobRefUnlocked(caller, target, moduleId, blobId, ifMatch)) {
+                is RemoveBlobRefResult.ModuleNotFound -> DeleteBlobResult.ModuleNotFound to null
+                is RemoveBlobRefResult.BlobNotFound -> DeleteBlobResult.BlobNotFound to null
+                is RemoveBlobRefResult.EtagMismatch -> DeleteBlobResult.EtagMismatch(result.currentEtag) to null
+                is RemoveBlobRefResult.Success -> {
+                    val removed = result.removed
+                    if (removed.blobRef.sizeBytes > 0) {
+                        storageTracker.adjustUsed(caller.accountId, -removed.blobRef.sizeBytes)
+                    }
+                    DeleteBlobResult.Success(removed.newMeta.etag, removed.blobRef.sizeBytes) to removed.orphanPath
+                }
+            }
+        }
+
+        if (orphanPath != null) {
+            // Dispatchers.IO: deleteRecursively is blocking FS work; AppScope default is Dispatchers.Default.
+            appScope.launch(Dispatchers.IO) {
+                try {
+                    orphanPath.deleteRecursively()
+                } catch (e: Exception) {
+                    log(TAG, WARN) { "deleteBlob: failed to delete orphan $orphanPath: ${e.message}" }
+                }
+            }
+        }
+
+        if (outcome is DeleteBlobResult.Success) {
+            log(TAG) { "deleteBlob(${caller.id.shortId()}): $moduleId/$blobId (-${outcome.removedSizeBytes}B)" }
+        }
+        return outcome
     }
 
     /**

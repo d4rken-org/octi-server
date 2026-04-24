@@ -12,6 +12,7 @@ import eu.darken.octi.server.device.Device
 import eu.darken.octi.server.device.DeviceId
 import eu.darken.octi.server.device.DeviceKey
 import eu.darken.octi.server.device.DeviceRepo
+import eu.darken.octi.server.ws.SyncNotifier
 import io.ktor.http.*
 import io.ktor.server.plugins.bodylimit.*
 import io.ktor.server.request.*
@@ -30,6 +31,8 @@ class BlobRoute @Inject constructor(
     private val moduleRepo: ModuleRepo,
     private val sessionRepo: UploadSessionRepo,
     private val storageTracker: AccountStorageTracker,
+    private val lifecycleService: ModuleLifecycleService,
+    private val syncNotifier: SyncNotifier,
 ) {
 
     // region DTOs
@@ -76,12 +79,18 @@ class BlobRoute @Inject constructor(
         val sizeBytes: Long,
         val state: String,
     )
+
+    @Serializable
+    data class DeleteBlobResponse(
+        val etag: String,
+    )
     // endregion
 
     fun setup(rootRoute: Routing) {
         rootRoute.route("/v1/module/{moduleId}") {
             get("/blobs") { catchError { listBlobs() } }
             get("/blobs/{blobId}") { catchError { downloadBlob() } }
+            delete("/blobs/{blobId}") { catchError { deleteBlob() } }
 
             post("/blob-sessions") { catchError { createSession() } }
             get("/blob-sessions/{sessionId}") { catchError { sessionStatus() } }
@@ -131,6 +140,23 @@ class BlobRoute @Inject constructor(
                 call.respond(HttpStatusCode.NotFound, "Target device not found")
                 null
             }
+    }
+
+    /**
+     * Parses an entity-tag for `If-Match`. Accepts `*`, `"opaque"`, and bare `opaque`
+     * (legacy clients). Rejects weak (`W/"..."`) — If-Match requires strong comparison
+     * (RFC 7232 §3.1). Returns null for malformed input so the caller can respond 400.
+     * Duplicated from ModuleRoute until a third consumer appears and lifting pays off.
+     */
+    private fun parseStrongEtag(raw: String): String? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        if (trimmed == "*") return "*"
+        if (trimmed.startsWith("W/", ignoreCase = true)) return null
+        if (trimmed.startsWith("\"") && trimmed.endsWith("\"") && trimmed.length >= 2) {
+            return trimmed.substring(1, trimmed.length - 1)
+        }
+        return trimmed
     }
     // endregion
 
@@ -190,6 +216,57 @@ class BlobRoute @Inject constructor(
             try {
                 handle.close()
             } catch (_: Exception) {
+            }
+        }
+    }
+
+    private suspend fun RoutingContext.deleteBlob() {
+        val moduleId = requireModuleId() ?: run {
+            call.respond(HttpStatusCode.BadRequest, "Invalid moduleId")
+            return
+        }
+        val blobId = call.parameters["blobId"] ?: run {
+            call.respond(HttpStatusCode.BadRequest, "Missing blobId")
+            return
+        }
+
+        val ifMatchRaw = call.request.headers["If-Match"] ?: run {
+            call.respond(HttpStatusCode.BadRequest, "If-Match header is required for blob delete")
+            return
+        }
+        val ifMatch = parseStrongEtag(ifMatchRaw) ?: run {
+            call.respond(HttpStatusCode.BadRequest, "Malformed If-Match header")
+            return
+        }
+        if (ifMatch == "*") {
+            call.respond(HttpStatusCode.BadRequest, "Wildcard If-Match not supported on blob delete")
+            return
+        }
+
+        val caller = verifyCaller(TAG, deviceRepo) ?: return
+        val target = verifyTarget(caller) ?: return
+
+        when (val result = lifecycleService.deleteBlob(caller, target, moduleId, blobId, ifMatch)) {
+            is ModuleLifecycleService.DeleteBlobResult.ModuleNotFound ->
+                call.respond(HttpStatusCode.NotFound, "Module not found")
+            is ModuleLifecycleService.DeleteBlobResult.BlobNotFound ->
+                call.respond(HttpStatusCode.NotFound, "Blob not found")
+            is ModuleLifecycleService.DeleteBlobResult.EtagMismatch -> {
+                call.response.header("ETag", "\"${result.currentEtag}\"")
+                call.respond(HttpStatusCode.PreconditionFailed, "ETag mismatch")
+            }
+            is ModuleLifecycleService.DeleteBlobResult.Success -> {
+                call.response.header("ETag", "\"${result.newEtag}\"")
+                call.respond(DeleteBlobResponse(etag = result.newEtag))
+                log(TAG) { "deleteBlob(${caller.id.shortId()}): $moduleId/$blobId deleted" }
+
+                syncNotifier.enqueueModuleChanged(
+                    accountId = caller.accountId,
+                    sourceDeviceId = caller.id,
+                    targetDeviceId = target.id,
+                    moduleId = moduleId,
+                    action = "updated",
+                )
             }
         }
     }
