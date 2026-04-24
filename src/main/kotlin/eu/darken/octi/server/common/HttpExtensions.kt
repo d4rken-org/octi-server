@@ -87,6 +87,23 @@ suspend fun authenticateDevice(
     return AuthResult.Success(deviceId, updatedDevice)
 }
 
+/**
+ * Parses an entity-tag for `If-Match` / `If-None-Match`.
+ * Accepts `*`, `"opaque"`, and bare `opaque` (legacy clients).
+ * Rejects weak (`W/"..."`) — If-Match requires strong comparison (RFC 7232 §3.1).
+ * Returns null for malformed input so the caller can respond 400.
+ */
+fun parseStrongEtag(raw: String): String? {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return null
+    if (trimmed == "*") return "*"
+    if (trimmed.startsWith("W/", ignoreCase = true)) return null
+    if (trimmed.startsWith("\"") && trimmed.endsWith("\"") && trimmed.length >= 2) {
+        return trimmed.substring(1, trimmed.length - 1)
+    }
+    return trimmed
+}
+
 suspend fun RoutingContext.verifyCaller(tag: String, deviceRepo: DeviceRepo): Device? {
     val tracker = call.application.attributes.getOrNull(IpDeviceTrackerKey)
     val result = authenticateDevice(

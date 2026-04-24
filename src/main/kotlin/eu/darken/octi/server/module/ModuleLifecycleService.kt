@@ -289,8 +289,9 @@ class ModuleLifecycleService @Inject constructor(
 
         // Fire-and-forget orphan cleanup on AppScope. StartupRecoveryService sweeps any
         // stragglers on next boot, so a crash here is not load-bearing.
+        // Dispatchers.IO: deleteRecursively is blocking FS work; AppScope default is Dispatchers.Default.
         if (orphanPaths.isNotEmpty()) {
-            appScope.launch {
+            appScope.launch(Dispatchers.IO) {
                 for (path in orphanPaths) {
                     try {
                         path.deleteRecursively()
