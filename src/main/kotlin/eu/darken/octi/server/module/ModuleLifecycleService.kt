@@ -34,6 +34,7 @@ class ModuleLifecycleService @Inject constructor(
         data class Success(val meta: ModuleMeta) : LegacyWriteResult
         data object BlobBacked : LegacyWriteResult
         data object QuotaExceeded : LegacyWriteResult
+        data object ModuleLimitExceeded : LegacyWriteResult
     }
 
     sealed interface CommitResult {
@@ -41,6 +42,7 @@ class ModuleLifecycleService @Inject constructor(
         data class PreconditionFailed(val message: String) : CommitResult
         data class BadRequest(val message: String) : CommitResult
         data object QuotaExceeded : CommitResult
+        data object ModuleLimitExceeded : CommitResult
     }
 
     sealed interface DeleteBlobResult {
@@ -66,6 +68,12 @@ class ModuleLifecycleService @Inject constructor(
             val oldMeta = moduleRepo.loadMeta(target, moduleId)
             if (oldMeta != null && oldMeta.blobRefs.isNotEmpty()) {
                 return@withLock LegacyWriteResult.BlobBacked
+            }
+
+            // Module count cap — only relevant when this is a new moduleId on this device.
+            if (!moduleRepo.moduleDirExists(target, moduleId) &&
+                moduleRepo.countModuleDirs(target) >= config.maxModulesPerDevice) {
+                return@withLock LegacyWriteResult.ModuleLimitExceeded
             }
 
             val oldDocSize = oldMeta?.documentSizeBytes ?: 0L
@@ -196,6 +204,13 @@ class ModuleLifecycleService @Inject constructor(
                 else -> "PUT requires If-Match or If-None-Match: *"
             }
             if (error != null) return@withLock CommitResult.PreconditionFailed(error) to emptyList<Path>()
+
+            // Module count cap — relevant when this commit creates a new moduleId on disk.
+            // Existing module dirs (committed or session-only) skip the check.
+            if (!moduleRepo.moduleDirExists(target, moduleId) &&
+                moduleRepo.countModuleDirs(target) >= config.maxModulesPerDevice) {
+                return@withLock CommitResult.ModuleLimitExceeded to emptyList<Path>()
+            }
 
             // Pre-check the document delta against quota *before* any disk I/O. Blob bytes are
             // already reserved at session creation; only the document needs an at-commit check.

@@ -173,6 +173,10 @@ class ModuleRoute @Inject constructor(
                 call.respond(HttpStatusCode.InsufficientStorage, "Account storage quota exceeded")
                 return
             }
+            is ModuleLifecycleService.LegacyWriteResult.ModuleLimitExceeded -> {
+                call.respond(HttpStatusCode.Conflict, "Module count limit reached (max ${config.maxModulesPerDevice} per device)")
+                return
+            }
             is ModuleLifecycleService.LegacyWriteResult.Success -> {
                 call.response.header("ETag", "\"${result.meta.etag}\"")
                 call.respond(HttpStatusCode.OK).also {
@@ -277,6 +281,10 @@ class ModuleRoute @Inject constructor(
             }
             is ModuleLifecycleService.CommitResult.QuotaExceeded -> {
                 call.respond(HttpStatusCode.InsufficientStorage, "Account storage quota exceeded")
+                return
+            }
+            is ModuleLifecycleService.CommitResult.ModuleLimitExceeded -> {
+                call.respond(HttpStatusCode.Conflict, "Module count limit reached (max ${config.maxModulesPerDevice} per device)")
                 return
             }
             is ModuleLifecycleService.CommitResult.Success -> {

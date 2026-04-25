@@ -20,6 +20,7 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.utils.io.*
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import java.util.*
 import javax.inject.Inject
@@ -35,6 +36,14 @@ class BlobRoute @Inject constructor(
     private val lifecycleService: ModuleLifecycleService,
     private val syncNotifier: SyncNotifier,
 ) {
+
+    private sealed interface CreateSessionOutcome {
+        data class Created(val session: UploadSessionMeta) : CreateSessionOutcome
+        data object QuotaExceeded : CreateSessionOutcome
+        data object ModuleLimitExceeded : CreateSessionOutcome
+        data class SessionLimitExceeded(val limit: Int) : CreateSessionOutcome
+        data class Failed(val error: Exception) : CreateSessionOutcome
+    }
 
     // region DTOs
     @Serializable
@@ -410,40 +419,66 @@ class BlobRoute @Inject constructor(
             return
         }
 
-        if (request.sizeBytes > 0 && !storageTracker.tryReserve(caller.accountId, request.sizeBytes)) {
-            call.respond(HttpStatusCode.InsufficientStorage, "Account storage quota exceeded")
-            return
+        // Module count cap + quota reservation + session creation must all happen under
+        // target.sync so two concurrent requests can't both pass the count check and end up
+        // creating distinct module dirs that together exceed the cap.
+        val outcome = target.sync.withLock {
+            if (!moduleRepo.moduleDirExists(target, moduleId) &&
+                moduleRepo.countModuleDirs(target) >= config.maxModulesPerDevice) {
+                return@withLock CreateSessionOutcome.ModuleLimitExceeded
+            }
+            if (request.sizeBytes > 0 && !storageTracker.tryReserve(caller.accountId, request.sizeBytes)) {
+                return@withLock CreateSessionOutcome.QuotaExceeded
+            }
+            try {
+                CreateSessionOutcome.Created(
+                    sessionRepo.createSession(
+                        accountId = caller.accountId,
+                        deviceId = target.id,
+                        moduleId = moduleId,
+                        expectedSizeBytes = request.sizeBytes,
+                        hashAlgorithm = request.hashAlgorithm,
+                        hashHex = request.hashHex,
+                    )
+                )
+            } catch (e: SessionLimitExceededException) {
+                if (request.sizeBytes > 0) storageTracker.releaseReservation(caller.accountId, request.sizeBytes)
+                CreateSessionOutcome.SessionLimitExceeded(e.limit)
+            } catch (e: Exception) {
+                if (request.sizeBytes > 0) storageTracker.releaseReservation(caller.accountId, request.sizeBytes)
+                CreateSessionOutcome.Failed(e)
+            }
         }
 
-        val session = try {
-            sessionRepo.createSession(
-                accountId = caller.accountId,
-                deviceId = target.id,
-                moduleId = moduleId,
-                expectedSizeBytes = request.sizeBytes,
-                hashAlgorithm = request.hashAlgorithm,
-                hashHex = request.hashHex,
-            )
-        } catch (e: SessionLimitExceededException) {
-            if (request.sizeBytes > 0) storageTracker.releaseReservation(caller.accountId, request.sizeBytes)
-            call.respond(HttpStatusCode.Conflict, "Active session limit exceeded (max ${e.limit})")
-            return
-        } catch (e: Exception) {
-            if (request.sizeBytes > 0) storageTracker.releaseReservation(caller.accountId, request.sizeBytes)
-            throw e
+        when (outcome) {
+            is CreateSessionOutcome.QuotaExceeded -> {
+                call.respond(HttpStatusCode.InsufficientStorage, "Account storage quota exceeded")
+                return
+            }
+            is CreateSessionOutcome.ModuleLimitExceeded -> {
+                call.respond(HttpStatusCode.Conflict, "Module count limit reached (max ${config.maxModulesPerDevice} per device)")
+                return
+            }
+            is CreateSessionOutcome.SessionLimitExceeded -> {
+                call.respond(HttpStatusCode.Conflict, "Active session limit exceeded (max ${outcome.limit})")
+                return
+            }
+            is CreateSessionOutcome.Failed -> throw outcome.error
+            is CreateSessionOutcome.Created -> {
+                val session = outcome.session
+                call.respond(
+                    HttpStatusCode.Created,
+                    SessionResponse(
+                        blobId = session.blobId,
+                        sessionId = session.sessionId,
+                        offsetBytes = 0,
+                        expiresAt = session.expiresAt.toString(),
+                        state = session.state.name.lowercase(),
+                    )
+                )
+                log(TAG) { "createSession(${caller.id.shortId()}): session=${session.sessionId}, blob=${session.blobId}, size=${request.sizeBytes}" }
+            }
         }
-
-        call.respond(
-            HttpStatusCode.Created,
-            SessionResponse(
-                blobId = session.blobId,
-                sessionId = session.sessionId,
-                offsetBytes = 0,
-                expiresAt = session.expiresAt.toString(),
-                state = session.state.name.lowercase(),
-            )
-        )
-        log(TAG) { "createSession(${caller.id.shortId()}): session=${session.sessionId}, blob=${session.blobId}, size=${request.sizeBytes}" }
     }
 
     private suspend fun RoutingContext.sessionStatus() {

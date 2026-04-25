@@ -62,6 +62,7 @@ class App @Inject constructor(
         val maxBlobPatchBytes: Long = 1L * 1024 * 1024, // 1 MB per chunk
         // Count caps — bound dirent/inode growth that quota alone cannot reach.
         val maxDevicesPerAccount: Int = 64,
+        val maxModulesPerDevice: Int = 256,
     )
 
     companion object {

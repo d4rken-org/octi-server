@@ -635,6 +635,25 @@ class ModuleRepo @Inject constructor(
         return target.getModulePath(moduleId)
     }
 
+    /**
+     * Counts existing module directories for [target]. Includes session-only directories
+     * because each one consumes a dirent and contributes to inode pressure regardless of
+     * whether anything has committed there yet.
+     */
+    fun countModuleDirs(target: Device): Int {
+        val modulesPath = target.modulesPath
+        if (!modulesPath.exists()) return 0
+        return modulesPath.listDirectoryEntries().size
+    }
+
+    /**
+     * Whether `moduleId` already has on-disk state on [target] (committed or session-only).
+     * Callers use this to skip the count cap when writing to an existing module.
+     */
+    fun moduleDirExists(target: Device, moduleId: ModuleId): Boolean {
+        return target.getModulePath(moduleId).exists()
+    }
+
     private val Device.modulesPath: Path
         get() = path.resolve(MODULES_DIR)
 
