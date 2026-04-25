@@ -191,17 +191,142 @@ class BlobRoute @Inject constructor(
 
         try {
             moduleRepo.touchAccess(target, moduleId)
-            call.respondOutputStream(
-                contentType = ContentType.Application.OctetStream,
-                contentLength = handle.sizeBytes,
-            ) {
-                handle.stream.use { it.copyTo(this) }
+
+            val etag = strongEtagFor(handle, blobId)
+            call.response.header(HttpHeaders.AcceptRanges, "bytes")
+            call.response.header(HttpHeaders.ETag, "\"$etag\"")
+
+            // If-None-Match short-circuits the body — the client already has a matching copy.
+            val ifNoneMatch = call.request.headers[HttpHeaders.IfNoneMatch]?.let { parseStrongEtag(it) }
+            if (ifNoneMatch != null && ifNoneMatch == etag) {
+                call.respond(HttpStatusCode.NotModified)
+                return
+            }
+
+            val rangeRequest = call.request.headers[HttpHeaders.Range]
+            val range = if (rangeRequest != null) parseSingleByteRange(rangeRequest, handle.sizeBytes) else null
+            when (range) {
+                is RangeParse.Unsatisfiable -> {
+                    // Spec-compliant: include Content-Range with total so clients can recover.
+                    call.response.header(HttpHeaders.ContentRange, "bytes */${handle.sizeBytes}")
+                    call.respond(HttpStatusCode.RequestedRangeNotSatisfiable, "Range not satisfiable")
+                    return
+                }
+                is RangeParse.Single -> {
+                    val length = range.endInclusive - range.start + 1
+                    call.response.header(
+                        HttpHeaders.ContentRange,
+                        "bytes ${range.start}-${range.endInclusive}/${handle.sizeBytes}",
+                    )
+                    call.response.status(HttpStatusCode.PartialContent)
+                    call.respondOutputStream(
+                        contentType = ContentType.Application.OctetStream,
+                        contentLength = length,
+                    ) {
+                        handle.stream.use { input ->
+                            // skip() is allowed to short-skip; loop until the full offset is consumed.
+                            var remaining = range.start
+                            while (remaining > 0) {
+                                val skipped = input.skip(remaining)
+                                if (skipped <= 0) error("InputStream skip returned $skipped at offset $remaining")
+                                remaining -= skipped
+                            }
+                            copyExact(input, this, length)
+                        }
+                    }
+                }
+                null -> {
+                    // No Range header (or multi-range, which we explicitly fall back to a 200 full body for
+                    // per RFC 7233 §4.3 — we don't support multipart/byteranges).
+                    call.respondOutputStream(
+                        contentType = ContentType.Application.OctetStream,
+                        contentLength = handle.sizeBytes,
+                    ) {
+                        handle.stream.use { it.copyTo(this) }
+                    }
+                }
             }
         } finally {
             try {
                 handle.close()
             } catch (_: Exception) {
             }
+        }
+    }
+
+    private fun strongEtagFor(handle: BlobHandle, blobId: String): String {
+        // Prefer the content hash (already computed on finalize) for cross-device cache consistency;
+        // fall back to "<blobId>-<size>" for legacy blobs that don't carry a hash.
+        val algo = handle.hashAlgorithm
+        val hex = handle.hashHex
+        return if (algo != null && hex != null) "$algo:$hex" else "$blobId-${handle.sizeBytes}"
+    }
+
+    private sealed interface RangeParse {
+        data class Single(val start: Long, val endInclusive: Long) : RangeParse
+        data object Unsatisfiable : RangeParse
+    }
+
+    /**
+     * Parses a single-range `Range:` header against [size]. Returns:
+     * - [RangeParse.Single] for a satisfiable single byte-range (handles `bytes=N-`, `bytes=N-M`,
+     *   and suffix `bytes=-N`).
+     * - [RangeParse.Unsatisfiable] when the spec indicates 416 (range entirely past EOF, or
+     *   `bytes=0-0` against a zero-byte blob).
+     * - `null` for syntactically invalid OR multi-range requests so the caller can fall back to a
+     *   full-body 200 response (RFC 7233 §4.3 permits this and we don't support
+     *   multipart/byteranges).
+     */
+    private fun parseSingleByteRange(header: String, size: Long): RangeParse? {
+        val trimmed = header.trim()
+        if (!trimmed.startsWith("bytes=", ignoreCase = true)) return null
+        val spec = trimmed.substring("bytes=".length).trim()
+        // Multi-range falls back to 200 full body. We don't reject it as 416.
+        if (spec.contains(',')) return null
+
+        val dashIdx = spec.indexOf('-')
+        if (dashIdx < 0) return null
+        val startStr = spec.substring(0, dashIdx).trim()
+        val endStr = spec.substring(dashIdx + 1).trim()
+
+        return when {
+            // Suffix range: "bytes=-N" → last N bytes. N == 0 against any size is unsatisfiable.
+            startStr.isEmpty() -> {
+                val suffix = endStr.toLongOrNull() ?: return null
+                if (suffix < 0) return null
+                if (suffix == 0L) RangeParse.Unsatisfiable
+                else if (size == 0L) RangeParse.Unsatisfiable
+                else {
+                    val effective = suffix.coerceAtMost(size)
+                    RangeParse.Single(start = size - effective, endInclusive = size - 1)
+                }
+            }
+            else -> {
+                val start = startStr.toLongOrNull() ?: return null
+                if (start < 0) return null
+                if (size == 0L) return RangeParse.Unsatisfiable
+                if (start >= size) return RangeParse.Unsatisfiable
+                val end = if (endStr.isEmpty()) {
+                    size - 1
+                } else {
+                    val parsed = endStr.toLongOrNull() ?: return null
+                    if (parsed < start) return null
+                    parsed.coerceAtMost(size - 1)
+                }
+                RangeParse.Single(start = start, endInclusive = end)
+            }
+        }
+    }
+
+    private fun copyExact(source: java.io.InputStream, sink: java.io.OutputStream, length: Long) {
+        val buffer = ByteArray(8 * 1024)
+        var remaining = length
+        while (remaining > 0) {
+            val cap = if (remaining > buffer.size) buffer.size else remaining.toInt()
+            val read = source.read(buffer, 0, cap)
+            if (read < 0) error("Unexpected EOF: $remaining bytes remaining")
+            sink.write(buffer, 0, read)
+            remaining -= read
         }
     }
 

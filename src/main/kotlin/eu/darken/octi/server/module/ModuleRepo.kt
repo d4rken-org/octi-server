@@ -614,6 +614,8 @@ class ModuleRepo @Inject constructor(
             BlobHandle(
                 stream = Files.newInputStream(blobFile),
                 sizeBytes = ref.sizeBytes,
+                hashAlgorithm = ref.hashAlgorithm,
+                hashHex = ref.hashHex,
             )
         }
     }
@@ -688,10 +690,15 @@ internal data class ModuleAccounting(
 
 /**
  * Already-open handle to a live blob. Caller owns [stream] and must close it.
+ *
+ * [hashAlgorithm] / [hashHex] mirror the values from the v1 [ModuleMeta.BlobRef] so the
+ * download route can emit a strong ETag without a second metadata read.
  */
 class BlobHandle(
     val stream: InputStream,
     val sizeBytes: Long,
+    val hashAlgorithm: String? = null,
+    val hashHex: String? = null,
 ) : AutoCloseable {
     override fun close() {
         try {
