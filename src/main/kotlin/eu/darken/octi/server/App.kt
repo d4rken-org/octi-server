@@ -63,6 +63,7 @@ class App @Inject constructor(
         // Count caps — bound dirent/inode growth that quota alone cannot reach.
         val maxDevicesPerAccount: Int = 64,
         val maxModulesPerDevice: Int = 256,
+        val maxBlobRefsPerModule: Int = 64,
     )
 
     companion object {

@@ -205,6 +205,12 @@ class ModuleLifecycleService @Inject constructor(
             }
             if (error != null) return@withLock CommitResult.PreconditionFailed(error) to emptyList<Path>()
 
+            // Cap on number of blob refs per module — bounds blob dir accumulation across
+            // repeated commits to the same module.
+            if (blobRefIds.size > config.maxBlobRefsPerModule) {
+                return@withLock CommitResult.BadRequest("Too many blob refs (max ${config.maxBlobRefsPerModule})") to emptyList<Path>()
+            }
+
             // Module count cap — relevant when this commit creates a new moduleId on disk.
             // Existing module dirs (committed or session-only) skip the check.
             if (!moduleRepo.moduleDirExists(target, moduleId) &&

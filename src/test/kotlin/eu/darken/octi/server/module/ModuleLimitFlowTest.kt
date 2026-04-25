@@ -75,6 +75,26 @@ class ModuleLimitFlowTest : TestRunner() {
     }
 
     @Test
+    fun `PUT commit with too many blob refs returns 400`() = runTest2(
+        appConfig = baseConfig.copy(maxBlobRefsPerModule = 2),
+    ) {
+        val creds = createDevice()
+
+        // The cap check fires before blob resolution, so we don't need real blob IDs.
+        // Three fake blobRefs vs cap=2 → 400.
+        http.put("/v1/module/eu.darken.octi.toomany") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header("If-None-Match", "*")
+            contentType(ContentType.Application.Json)
+            setBody(
+                """{"documentBase64": "${base64Encode("doc".toByteArray())}",
+                |"blobRefs": [{"blobId": "a"}, {"blobId": "b"}, {"blobId": "c"}]}""".trimMargin()
+            )
+        }.status shouldBe HttpStatusCode.BadRequest
+    }
+
+    @Test
     fun `blob session create for an already-existing module is unaffected by the cap`() = runTest2(
         appConfig = baseConfig.copy(maxModulesPerDevice = 1),
     ) {
