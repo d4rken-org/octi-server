@@ -1,6 +1,7 @@
 package eu.darken.octi
 
 import eu.darken.octi.server.App
+import eu.darken.octi.server.AppComponent
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.VERBOSE
 import eu.darken.octi.server.common.debug.logging.log
 import io.ktor.client.*
@@ -14,6 +15,7 @@ import kotlinx.serialization.json.Json
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.*
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlin.io.path.Path
 import kotlin.io.path.deleteRecursively
@@ -30,26 +32,45 @@ abstract class TestRunner {
     data class TestEnvironment(
         val config: App.Config,
         val app: App,
+        val component: AppComponent,
         val http: HttpClient,
     )
 
     fun runTest2(
         appConfig: App.Config = baseConfig,
         keepData: Boolean = false,
-        before: (App.Config) -> TestEnvironment = {
-            Files.createDirectories(it.dataPath)
+        seed: (App.Config) -> Unit = {},
+        before: (App.Config) -> TestEnvironment = { cfg ->
+            Files.createDirectories(cfg.dataPath)
+            seed(cfg)
 
-            val app = App.createComponent(it).application()
-            thread { app.launch() }
+            val component = App.createComponent(cfg)
+            val app = component.application()
 
-            while (!app.isRunning()) Thread.sleep(100)
+            val launchError = AtomicReference<Throwable?>()
+            thread {
+                try {
+                    app.launch()
+                } catch (t: Throwable) {
+                    launchError.set(t)
+                }
+            }
+
+            val deadlineMillis = System.currentTimeMillis() + 30_000
+            while (!app.isRunning()) {
+                launchError.get()?.let { throw AssertionError("App.launch() failed before server started", it) }
+                if (System.currentTimeMillis() > deadlineMillis) {
+                    throw AssertionError("App did not start within 30s")
+                }
+                Thread.sleep(50)
+            }
 
             val client = HttpClient(CIO) {
                 defaultRequest {
                     url {
                         protocol = URLProtocol.HTTP
                         host = "127.0.0.1"
-                        port = appConfig.port
+                        port = cfg.port
                     }
                 }
                 install(ContentNegotiation) {
@@ -61,14 +82,14 @@ abstract class TestRunner {
                 }
             }
 
-            TestEnvironment(appConfig, app, client)
+            TestEnvironment(cfg, app, component, client)
         },
         after: TestEnvironment.() -> Unit = {
             http.close()
             app.shutdown()
             if (!keepData) {
                 log(VERBOSE) { "Cleaning up stored data" }
-                appConfig.dataPath.deleteRecursively()
+                config.dataPath.deleteRecursively()
             }
         },
         test: suspend TestEnvironment.() -> Unit

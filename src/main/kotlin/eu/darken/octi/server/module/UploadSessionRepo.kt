@@ -77,7 +77,7 @@ class UploadSessionRepo @Inject constructor(
         }
     }
 
-    private suspend fun reapExpiredSessions() {
+    internal suspend fun reapExpiredSessions() {
         val now = Instant.now()
         val expired = sessions.values.filter { it.meta.isExpired(now) }
         if (expired.isNotEmpty()) {

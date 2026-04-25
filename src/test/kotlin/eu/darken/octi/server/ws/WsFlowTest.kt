@@ -33,7 +33,8 @@ class WsFlowTest : TestRunner() {
     private fun runWsTest(test: suspend TestEnvironment.() -> Unit) {
         val appConfig = baseConfig.copy(port = 16024)
         Files.createDirectories(appConfig.dataPath)
-        val app = eu.darken.octi.server.App.createComponent(appConfig).application()
+        val component = eu.darken.octi.server.App.createComponent(appConfig)
+        val app = component.application()
         thread { app.launch() }
         while (!app.isRunning()) Thread.sleep(100)
 
@@ -54,7 +55,7 @@ class WsFlowTest : TestRunner() {
             }
         }
 
-        val env = TestEnvironment(appConfig, app, client)
+        val env = TestEnvironment(appConfig, app, component, client)
         try {
             runBlocking { test(env) }
         } finally {
