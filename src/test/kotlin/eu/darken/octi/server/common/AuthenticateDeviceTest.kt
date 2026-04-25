@@ -16,6 +16,12 @@ import org.junit.jupiter.api.Test
 import java.nio.file.Path
 import java.util.*
 
+/**
+ * Pre-G4-fix this file tested authenticateDevice end-to-end including side effects.
+ * Now that validation and metadata-touch are split (so over-rate-limit calls don't
+ * write lastSeen) the tests are split too: validation-only here, side-effect coverage
+ * in [TouchAuthenticatedDeviceTest].
+ */
 class AuthenticateDeviceTest {
 
     private val accountId: UUID = UUID.randomUUID()
@@ -23,10 +29,7 @@ class AuthenticateDeviceTest {
     private val password = "test-password-12345"
 
     private lateinit var deviceRepo: DeviceRepo
-    private lateinit var ipTracker: IpDeviceTracker
     private lateinit var device: Device
-
-    private val clientIp = "10.0.0.1"
 
     @BeforeEach
     fun setup() {
@@ -38,7 +41,6 @@ class AuthenticateDeviceTest {
         deviceRepo = mockk(relaxed = true) {
             coEvery { getDevice(DeviceKey(accountId, deviceId)) } returns device
         }
-        ipTracker = mockk(relaxed = true)
     }
 
     private fun basicAuth(account: UUID = accountId, pw: String = password): String {
@@ -47,76 +49,56 @@ class AuthenticateDeviceTest {
     }
 
     @Test
-    fun `success records to tracker`() = runTest {
+    fun `valid headers return Success`() = runTest {
         val result = authenticateDevice(
             deviceIdHeader = deviceId.toString(),
             authHeader = basicAuth(),
             deviceRepo = deviceRepo,
-            clientIp = clientIp,
-            ipTracker = ipTracker,
         )
 
         result.shouldBeInstanceOf<AuthResult.Success>()
-        verify(exactly = 1) { ipTracker.record(clientIp, accountId, deviceId) }
+        result.deviceId shouldBe deviceId
+        result.device shouldBe device
     }
 
     @Test
-    fun `success without tracker does not fail`() = runTest {
-        val result = authenticateDevice(
+    fun `validation does not touch device repo for updates`() = runTest {
+        authenticateDevice(
             deviceIdHeader = deviceId.toString(),
             authHeader = basicAuth(),
             deviceRepo = deviceRepo,
-            clientIp = clientIp,
-            ipTracker = null,
         )
 
-        result.shouldBeInstanceOf<AuthResult.Success>()
+        // Pure validation must not write — that belongs to touchAuthenticatedDevice.
+        coVerify(exactly = 0) { deviceRepo.updateDevice(any(), any()) }
     }
 
     @Test
-    fun `success without clientIp does not record`() = runTest {
-        val result = authenticateDevice(
-            deviceIdHeader = deviceId.toString(),
-            authHeader = basicAuth(),
-            deviceRepo = deviceRepo,
-            clientIp = null,
-            ipTracker = ipTracker,
-        )
-
-        result.shouldBeInstanceOf<AuthResult.Success>()
-        verify(exactly = 0) { ipTracker.record(any(), any(), any()) }
-    }
-
-    @Test
-    fun `missing device ID does not record`() = runTest {
+    fun `missing device ID returns BadRequest`() = runTest {
         val result = authenticateDevice(
             deviceIdHeader = null,
             authHeader = basicAuth(),
             deviceRepo = deviceRepo,
-            clientIp = clientIp,
-            ipTracker = ipTracker,
         )
 
         result.shouldBeInstanceOf<AuthResult.Failure>()
-        verify(exactly = 0) { ipTracker.record(any(), any(), any()) }
+        result.status.value shouldBe 400
     }
 
     @Test
-    fun `missing auth header does not record`() = runTest {
+    fun `missing auth header returns BadRequest`() = runTest {
         val result = authenticateDevice(
             deviceIdHeader = deviceId.toString(),
             authHeader = null,
             deviceRepo = deviceRepo,
-            clientIp = clientIp,
-            ipTracker = ipTracker,
         )
 
         result.shouldBeInstanceOf<AuthResult.Failure>()
-        verify(exactly = 0) { ipTracker.record(any(), any(), any()) }
+        result.status.value shouldBe 400
     }
 
     @Test
-    fun `unknown device does not record`() = runTest {
+    fun `unknown device returns NotFound`() = runTest {
         val unknownId = UUID.randomUUID()
         coEvery { deviceRepo.getDevice(DeviceKey(accountId, unknownId)) } returns null
 
@@ -124,26 +106,81 @@ class AuthenticateDeviceTest {
             deviceIdHeader = unknownId.toString(),
             authHeader = basicAuth(),
             deviceRepo = deviceRepo,
-            clientIp = clientIp,
-            ipTracker = ipTracker,
         )
 
         result.shouldBeInstanceOf<AuthResult.Failure>()
-        verify(exactly = 0) { ipTracker.record(any(), any(), any()) }
+        result.status.value shouldBe 404
     }
 
     @Test
-    fun `wrong password does not record`() = runTest {
+    fun `wrong password returns Unauthorized`() = runTest {
         val result = authenticateDevice(
             deviceIdHeader = deviceId.toString(),
             authHeader = basicAuth(pw = "wrong-password"),
+            deviceRepo = deviceRepo,
+        )
+
+        result.shouldBeInstanceOf<AuthResult.Failure>()
+        result.status.value shouldBe 401
+    }
+}
+
+class TouchAuthenticatedDeviceTest {
+
+    private val accountId: UUID = UUID.randomUUID()
+    private val deviceId: UUID = UUID.randomUUID()
+    private val clientIp = "10.0.0.1"
+
+    private lateinit var deviceRepo: DeviceRepo
+    private lateinit var ipTracker: IpDeviceTracker
+    private lateinit var device: Device
+
+    @BeforeEach
+    fun setup() {
+        device = Device(
+            data = Device.Data(id = deviceId, password = "irrelevant", version = null),
+            path = Path.of("/tmp/test"),
+            accountId = accountId,
+        )
+        deviceRepo = mockk(relaxed = true) {
+            coEvery { getDevice(DeviceKey(accountId, deviceId)) } returns device
+        }
+        ipTracker = mockk(relaxed = true)
+    }
+
+    @Test
+    fun `tracker records on touch`() = runTest {
+        touchAuthenticatedDevice(
+            device = device,
             deviceRepo = deviceRepo,
             clientIp = clientIp,
             ipTracker = ipTracker,
         )
 
-        result.shouldBeInstanceOf<AuthResult.Failure>()
+        verify(exactly = 1) { ipTracker.record(clientIp, accountId, deviceId) }
+    }
+
+    @Test
+    fun `null clientIp skips tracker`() = runTest {
+        touchAuthenticatedDevice(
+            device = device,
+            deviceRepo = deviceRepo,
+            clientIp = null,
+            ipTracker = ipTracker,
+        )
+
         verify(exactly = 0) { ipTracker.record(any(), any(), any()) }
+    }
+
+    @Test
+    fun `null tracker is tolerated`() = runTest {
+        touchAuthenticatedDevice(
+            device = device,
+            deviceRepo = deviceRepo,
+            clientIp = clientIp,
+            ipTracker = null,
+        )
+        // No throw.
     }
 
     @Test
@@ -151,9 +188,8 @@ class AuthenticateDeviceTest {
         val actionSlot = slot<(Device.Data) -> Device.Data>()
         coEvery { deviceRepo.updateDevice(any(), capture(actionSlot)) } returns Unit
 
-        authenticateDevice(
-            deviceIdHeader = deviceId.toString(),
-            authHeader = basicAuth(),
+        touchAuthenticatedDevice(
+            device = device,
             deviceRepo = deviceRepo,
             metadata = DeviceMetadataPatch(label = "My Phone"),
         )
@@ -164,16 +200,15 @@ class AuthenticateDeviceTest {
     }
 
     @Test
-    fun `metadata absent preserves existing label`() = runTest {
+    fun `null metadata fields preserve existing values`() = runTest {
         val deviceWithLabel = device.copy(data = device.data.copy(label = "Old Label"))
         coEvery { deviceRepo.getDevice(DeviceKey(accountId, deviceId)) } returns deviceWithLabel
 
         val actionSlot = slot<(Device.Data) -> Device.Data>()
         coEvery { deviceRepo.updateDevice(any(), capture(actionSlot)) } returns Unit
 
-        authenticateDevice(
-            deviceIdHeader = deviceId.toString(),
-            authHeader = basicAuth(),
+        touchAuthenticatedDevice(
+            device = deviceWithLabel,
             deviceRepo = deviceRepo,
             metadata = DeviceMetadataPatch(),
         )
@@ -183,18 +218,16 @@ class AuthenticateDeviceTest {
     }
 
     @Test
-    fun `tracker exception does not break auth`() = runTest {
+    fun `tracker exception does not break the touch`() = runTest {
         io.mockk.every { ipTracker.record(any(), any(), any()) } throws RuntimeException("tracker broke")
 
-        val result = authenticateDevice(
-            deviceIdHeader = deviceId.toString(),
-            authHeader = basicAuth(),
+        val updated = touchAuthenticatedDevice(
+            device = device,
             deviceRepo = deviceRepo,
             clientIp = clientIp,
             ipTracker = ipTracker,
         )
 
-        result.shouldBeInstanceOf<AuthResult.Success>()
-        result.deviceId shouldBe deviceId
+        updated shouldBe device
     }
 }

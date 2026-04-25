@@ -9,6 +9,8 @@ import eu.darken.octi.server.common.debug.logging.Logging.Priority.WARN
 import eu.darken.octi.server.common.debug.logging.asLog
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
+import eu.darken.octi.server.common.AccountRateLimiter
+import eu.darken.octi.server.common.AccountRateLimiterKey
 import eu.darken.octi.server.common.IpDeviceTracker
 import eu.darken.octi.server.common.IpDeviceTrackerKey
 import eu.darken.octi.server.common.installCallLogging
@@ -53,6 +55,7 @@ class Server @Inject constructor(
     private val wsRoute: WsRoute,
     private val serializers: SerializersModule,
     private val ipDeviceTracker: IpDeviceTracker,
+    private val accountRateLimiter: AccountRateLimiter,
 ) {
 
     @Suppress("ExtractKtorModule")
@@ -102,6 +105,7 @@ class Server @Inject constructor(
             }
 
             attributes.put(IpDeviceTrackerKey, ipDeviceTracker)
+            attributes.put(AccountRateLimiterKey, accountRateLimiter)
 
             config.rateLimit
                 ?.let { installRateLimit(it, ipDeviceTracker) }

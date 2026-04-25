@@ -1,11 +1,13 @@
 package eu.darken.octi.server.ws
 
+import eu.darken.octi.server.common.AccountRateLimiter
 import eu.darken.octi.server.common.AuthResult
 import eu.darken.octi.server.common.DeviceMetadataPatch
 import eu.darken.octi.server.common.IpDeviceTracker
 import eu.darken.octi.server.common.authenticateDevice
 import eu.darken.octi.server.common.clientIp
 import eu.darken.octi.server.common.normalizeLabel
+import eu.darken.octi.server.common.touchAuthenticatedDevice
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.INFO
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.WARN
 import eu.darken.octi.server.common.debug.logging.log
@@ -27,6 +29,7 @@ class WsRoute @Inject constructor(
     private val deviceRepo: DeviceRepo,
     private val connectionRegistry: ConnectionRegistry,
     private val ipDeviceTracker: IpDeviceTracker,
+    private val accountRateLimiter: AccountRateLimiter,
 ) {
 
     fun setup(rootRoute: Routing) {
@@ -35,13 +38,6 @@ class WsRoute @Inject constructor(
                 deviceIdHeader = call.request.headers["X-Device-ID"],
                 authHeader = call.request.headers["Authorization"],
                 deviceRepo = deviceRepo,
-                clientIp = call.request.clientIp(),
-                ipTracker = ipDeviceTracker,
-                metadata = DeviceMetadataPatch(
-                    version = call.request.headers["Octi-Device-Version"],
-                    platform = call.request.headers["Octi-Device-Platform"],
-                    label = normalizeLabel(call.request.headers["Octi-Device-Label"]),
-                ),
             )
             val auth = when (authResult) {
                 is AuthResult.Success -> authResult
@@ -51,6 +47,26 @@ class WsRoute @Inject constructor(
                     return@webSocket
                 }
             }
+
+            // Per-account rate-limit applies to WS connection establishment too.
+            if (!accountRateLimiter.tryAcquire(auth.device.accountId)) {
+                log(TAG, WARN) { "WS rate-limited: account=${auth.device.accountId}" }
+                close(CloseReason(CloseReason.Codes.TRY_AGAIN_LATER, "Account rate limit exceeded"))
+                return@webSocket
+            }
+
+            // Record metadata only after the rate-limit gate accepts.
+            touchAuthenticatedDevice(
+                device = auth.device,
+                deviceRepo = deviceRepo,
+                clientIp = call.request.clientIp(),
+                ipTracker = ipDeviceTracker,
+                metadata = DeviceMetadataPatch(
+                    version = call.request.headers["Octi-Device-Version"],
+                    platform = call.request.headers["Octi-Device-Platform"],
+                    label = normalizeLabel(call.request.headers["Octi-Device-Label"]),
+                ),
+            )
 
             val connectedAt = Instant.now()
             val clientIp = call.request.clientIp()

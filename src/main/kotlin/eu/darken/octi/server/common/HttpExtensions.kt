@@ -46,13 +46,16 @@ data class DeviceMetadataPatch(
 
 fun normalizeLabel(raw: String?): String? = raw?.trim()?.take(128)?.ifBlank { null }
 
+/**
+ * Validates the auth headers and returns the device on success — no side effects.
+ * Use [touchAuthenticatedDevice] to record lastSeen/IP after the per-account rate
+ * limit gate has accepted the call. Splitting validate from touch keeps over-limit
+ * requests from updating device metadata.
+ */
 suspend fun authenticateDevice(
     deviceIdHeader: String?,
     authHeader: String?,
     deviceRepo: DeviceRepo,
-    clientIp: String? = null,
-    ipTracker: IpDeviceTracker? = null,
-    metadata: DeviceMetadataPatch? = null,
 ): AuthResult {
     val deviceId = parseDeviceId(deviceIdHeader)
         ?: return AuthResult.Failure("X-Device-ID header is missing", HttpStatusCode.BadRequest)
@@ -67,6 +70,21 @@ suspend fun authenticateDevice(
         return AuthResult.Failure("Device credentials not found or insufficient", HttpStatusCode.Unauthorized)
     }
 
+    return AuthResult.Success(deviceId, device)
+}
+
+/**
+ * Records lastSeen + optional metadata + IP-device association for an already-authenticated
+ * device. Called only after the per-account rate-limit gate accepts the request, so over-limit
+ * traffic doesn't churn device metadata.
+ */
+suspend fun touchAuthenticatedDevice(
+    device: Device,
+    deviceRepo: DeviceRepo,
+    clientIp: String? = null,
+    ipTracker: IpDeviceTracker? = null,
+    metadata: DeviceMetadataPatch? = null,
+): Device {
     deviceRepo.updateDevice(device.key) {
         var updated = it.copy(lastSeen = Instant.now())
         metadata?.version?.let { v -> updated = updated.copy(version = v) }
@@ -74,17 +92,14 @@ suspend fun authenticateDevice(
         metadata?.label?.let { l -> updated = updated.copy(label = l) }
         updated
     }
-
     if (clientIp != null && ipTracker != null) {
         try {
-            ipTracker.record(clientIp, creds.accountId, deviceId)
+            ipTracker.record(clientIp, device.accountId, device.id)
         } catch (e: Exception) {
             log(TAG, WARN) { "Failed to record IP device tracking: ${e.message}" }
         }
     }
-
-    val updatedDevice = deviceRepo.getDevice(device.key) ?: device
-    return AuthResult.Success(deviceId, updatedDevice)
+    return deviceRepo.getDevice(device.key) ?: device
 }
 
 /**
@@ -105,25 +120,40 @@ fun parseStrongEtag(raw: String): String? {
 }
 
 suspend fun RoutingContext.verifyCaller(tag: String, deviceRepo: DeviceRepo): Device? {
-    val tracker = call.application.attributes.getOrNull(IpDeviceTrackerKey)
+    val ipTracker = call.application.attributes.getOrNull(IpDeviceTrackerKey)
+    val accountRateLimiter = call.application.attributes.getOrNull(AccountRateLimiterKey)
+
+    // 1. Validate credentials (no side effects).
     val result = authenticateDevice(
         deviceIdHeader = call.request.header("X-Device-ID"),
         authHeader = call.request.header("Authorization"),
         deviceRepo = deviceRepo,
+    )
+    val device = when (result) {
+        is AuthResult.Success -> result.device
+        is AuthResult.Failure -> {
+            log(tag, WARN) { "verifyAuth(): ${result.reason}" }
+            call.respond(result.status, result.reason)
+            return null
+        }
+    }
+
+    // 2. Per-account rate-limit gate. Over-limit calls don't get to update lastSeen.
+    if (accountRateLimiter != null && !accountRateLimiter.tryAcquire(device.accountId)) {
+        call.respond(HttpStatusCode.TooManyRequests, "Account rate limit exceeded")
+        return null
+    }
+
+    // 3. Record metadata only for accepted calls.
+    return touchAuthenticatedDevice(
+        device = device,
+        deviceRepo = deviceRepo,
         clientIp = call.request.clientIp(),
-        ipTracker = tracker,
+        ipTracker = ipTracker,
         metadata = DeviceMetadataPatch(
             version = call.request.header("Octi-Device-Version"),
             platform = call.request.header("Octi-Device-Platform"),
             label = normalizeLabel(call.request.header("Octi-Device-Label")),
         ),
     )
-    return when (result) {
-        is AuthResult.Success -> result.device
-        is AuthResult.Failure -> {
-            log(tag, WARN) { "verifyAuth(): ${result.reason}" }
-            call.respond(result.status, result.reason)
-            null
-        }
-    }
 }

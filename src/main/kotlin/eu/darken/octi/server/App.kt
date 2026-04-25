@@ -66,6 +66,9 @@ class App @Inject constructor(
         val maxDevicesPerAccount: Int = 64,
         val maxModulesPerDevice: Int = 256,
         val maxBlobRefsPerModule: Int = 64,
+        // Per-account rate budget (layered on top of per-IP rate limit).
+        val accountRateLimit: Int = 256,
+        val accountRateLimitWindowSeconds: Long = 60,
     )
 
     companion object {
