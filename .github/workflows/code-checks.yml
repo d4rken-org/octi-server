@@ -12,7 +12,7 @@ permissions:
 jobs:
   build-modules:
     name: Build apps
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 #v4
@@ -25,7 +25,7 @@ jobs:
 
   build-docker-image:
     name: Build Docker image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 #v4
@@ -42,8 +42,15 @@ jobs:
 
   run-tests:
     name: Run tests
-    runs-on: ubuntu-latest
-    container: ubuntu
+    runs-on: ubuntu-24.04
+    container: ubuntu:24.04
+    env:
+      # The container image ships with the POSIX locale, which makes the JVM use ASCII
+      # for sun.jnu.encoding. Kotlin then can't write .class files for backticked test
+      # names containing non-ASCII characters (em-dashes, etc.). C.UTF-8 is built into
+      # glibc on Ubuntu, no `locales` package needed.
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
     steps:
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 #v4
