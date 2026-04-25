@@ -1,6 +1,7 @@
 package eu.darken.octi.server.module
 
 import eu.darken.octi.server.App
+import eu.darken.octi.server.account.AccountStorageTracker
 import eu.darken.octi.server.common.AppScope
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.*
 import eu.darken.octi.server.common.debug.logging.asLog
@@ -31,6 +32,7 @@ class ModuleRepo @Inject constructor(
     private val serializer: Json,
     private val deviceRepo: DeviceRepo,
     private val sessionRepo: dagger.Lazy<UploadSessionRepo>,
+    private val storageTracker: AccountStorageTracker,
 ) {
 
     /**
@@ -76,9 +78,15 @@ class ModuleRepo @Inject constructor(
                             }
                             if (staleModules.isNotEmpty()) {
                                 log(TAG) { "Deleting ${staleModules.size} stale modules for ${device.id}" }
+                                var totalReclaimed = 0L
                                 staleModules.forEach {
+                                    val bytes = accountForModule(it).bytes
                                     accessShadow.remove(it)
                                     it.deleteRecursively()
+                                    totalReclaimed += bytes
+                                }
+                                if (totalReclaimed > 0) {
+                                    storageTracker.adjustUsed(device.accountId, -totalReclaimed)
                                 }
                             }
                         } catch (e: IOException) {

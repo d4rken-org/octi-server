@@ -26,6 +26,7 @@ class AccountRepo @Inject constructor(
     private val config: App.Config,
     private val serializer: Json,
     private val appScope: AppScope,
+    private val storageTracker: AccountStorageTracker,
 ) {
     private val accountsPath = config.dataPath.resolve("accounts").apply {
         if (!exists()) {
@@ -143,6 +144,9 @@ class AccountRepo @Inject constructor(
                     log(TAG, WARN) { "Deleted account file, will clean up on next restart." }
                 }
             }
+            // Idempotent: removeAccount on a non-tracked id is a no-op.
+            // Catches the GC path which doesn't go through ModuleLifecycleService.deleteForAccount.
+            storageTracker.removeAccount(account.id)
             log(TAG) { "deleteAccount($ids): Account deleted: $account" }
         }
     }

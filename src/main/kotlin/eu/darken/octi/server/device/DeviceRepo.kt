@@ -5,6 +5,7 @@ import eu.darken.octi.server.account.Account
 import eu.darken.octi.server.account.AccountId
 import eu.darken.octi.server.account.AccountRepo
 import eu.darken.octi.server.common.AppScope
+import eu.darken.octi.server.module.ModuleLifecycleService
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.*
 import eu.darken.octi.server.common.debug.logging.asLog
 import eu.darken.octi.server.common.debug.logging.log
@@ -27,6 +28,9 @@ class DeviceRepo @Inject constructor(
     private val config: App.Config,
     private val serializer: Json,
     private val accountsRepo: AccountRepo,
+    // Lazy: ModuleLifecycleService transitively depends on DeviceRepo via ModuleRepo,
+    // so a direct injection would be a Dagger cycle.
+    private val lifecycleService: dagger.Lazy<ModuleLifecycleService>,
 ) {
 
     private val devices = ConcurrentHashMap<DeviceKey, Device>()
@@ -77,6 +81,13 @@ class DeviceRepo @Inject constructor(
                 for (key in staleKeys) {
                     try {
                         log(TAG, WARN) { "Deleting stale device $key" }
+                        // Route through lifecycle service first so module bytes are credited
+                        // back to the account quota and outstanding sessions are aborted.
+                        // Direct deleteDevice(key) bypasses both.
+                        val target = devices[key]
+                        if (target != null) {
+                            lifecycleService.get().deleteForDevice(key.accountId, target)
+                        }
                         deleteDevice(key)
                     } catch (e: Exception) {
                         log(TAG, ERROR) { "Failed to delete stale device $key: ${e.message}" }
