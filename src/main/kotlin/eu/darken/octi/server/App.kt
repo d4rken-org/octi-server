@@ -77,6 +77,11 @@ class App @Inject constructor(
         fun main(args: Array<String>) {
             log(TAG, INFO) { "Program arguments: ${args.joinToString()}" }
 
+            val defaults = Config(
+                port = 0,
+                dataPath = Path("/tmp/placeholder"),
+            )
+
             val config = Config(
                 isDebug = args.any { it.startsWith("--debug") },
                 port = args
@@ -92,9 +97,26 @@ class App @Inject constructor(
                 } else {
                     RateLimitConfig()
                 },
+                accountQuotaBytes = parseSizeFlag(args, "--account-quota-mb", 1024L * 1024L)
+                    ?: defaults.accountQuotaBytes,
+                maxBlobBytes = parseSizeFlag(args, "--max-blob-mb", 1024L * 1024L)
+                    ?: defaults.maxBlobBytes,
             )
 
             createComponent(config).application().launch()
+        }
+
+        /**
+         * Parses a "--flag=N" arg into N * [unitBytes]. Returns null if the flag isn't
+         * present. Throws on malformed/non-positive values so a typo'd config
+         * fails the boot rather than silently flipping to a default.
+         */
+        private fun parseSizeFlag(args: Array<String>, flag: String, unitBytes: Long): Long? {
+            val raw = args.singleOrNull { it.startsWith("$flag=") } ?: return null
+            val value = raw.substringAfter('=').toLongOrNull()
+                ?: throw IllegalArgumentException("Invalid value for $flag: '${raw.substringAfter('=')}'")
+            require(value > 0) { "$flag must be positive, got $value" }
+            return value * unitBytes
         }
 
         fun createComponent(config: Config): AppComponent {

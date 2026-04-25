@@ -34,6 +34,14 @@ class AccountStorageRoute @Inject constructor(
         val maxActiveUploadSessionsPerDevice: Int,
         val idleSessionTtlSeconds: Long,
         val absoluteSessionTtlSeconds: Long,
+        // v2 additions (count caps + COMPLETE TTL + per-account session ceiling + rate limit).
+        val maxDevicesPerAccount: Int,
+        val maxModulesPerDevice: Int,
+        val maxBlobRefsPerModule: Int,
+        val maxActiveUploadSessionsPerAccount: Int,
+        val completeIdleTtlSeconds: Long,
+        val accountRateLimit: Int,
+        val accountRateLimitWindowSeconds: Long,
     )
 
     fun setup(rootRoute: Routing) {
@@ -55,7 +63,7 @@ class AccountStorageRoute @Inject constructor(
 
         call.respond(
             StorageResponse(
-                storageApiVersion = 1,
+                storageApiVersion = 2,
                 accountQuotaBytes = config.accountQuotaBytes,
                 usedBytes = usage.usedBytes,
                 reservedBytes = usage.reservedBytes,
@@ -65,6 +73,13 @@ class AccountStorageRoute @Inject constructor(
                 maxActiveUploadSessionsPerDevice = config.maxActiveUploadSessionsPerDevice,
                 idleSessionTtlSeconds = config.idleSessionTtlSeconds,
                 absoluteSessionTtlSeconds = config.absoluteSessionTtlSeconds,
+                maxDevicesPerAccount = config.maxDevicesPerAccount,
+                maxModulesPerDevice = config.maxModulesPerDevice,
+                maxBlobRefsPerModule = config.maxBlobRefsPerModule,
+                maxActiveUploadSessionsPerAccount = config.maxActiveUploadSessionsPerAccount,
+                completeIdleTtlSeconds = config.completeIdleTtlSeconds,
+                accountRateLimit = config.accountRateLimit,
+                accountRateLimitWindowSeconds = config.accountRateLimitWindowSeconds,
             )
         ).also {
             log(TAG) { "getStorage(${callerDevice.id.shortId()}): used=${usage.usedBytes}, reserved=${usage.reservedBytes}, available=$available" }

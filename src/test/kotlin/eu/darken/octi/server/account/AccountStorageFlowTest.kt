@@ -23,6 +23,13 @@ class AccountStorageFlowTest : TestRunner() {
         val maxActiveUploadSessionsPerDevice: Int = 0,
         val idleSessionTtlSeconds: Long = 0,
         val absoluteSessionTtlSeconds: Long = 0,
+        val maxDevicesPerAccount: Int = 0,
+        val maxModulesPerDevice: Int = 0,
+        val maxBlobRefsPerModule: Int = 0,
+        val maxActiveUploadSessionsPerAccount: Int = 0,
+        val completeIdleTtlSeconds: Long = 0,
+        val accountRateLimit: Int = 0,
+        val accountRateLimitWindowSeconds: Long = 0,
     )
 
     @Test
@@ -41,11 +48,19 @@ class AccountStorageFlowTest : TestRunner() {
         }.apply {
             status shouldBe HttpStatusCode.OK
             val storage = body<StorageInfo>()
-            storage.storageApiVersion shouldBe 1
+            storage.storageApiVersion shouldBe 2
             (storage.accountQuotaBytes > 0) shouldBe true
             (storage.maxBlobBytes > 0) shouldBe true
             (storage.maxModuleDocumentBytes > 0) shouldBe true
             (storage.maxActiveUploadSessionsPerDevice > 0) shouldBe true
+            // v2 fields
+            (storage.maxDevicesPerAccount > 0) shouldBe true
+            (storage.maxModulesPerDevice > 0) shouldBe true
+            (storage.maxBlobRefsPerModule > 0) shouldBe true
+            (storage.maxActiveUploadSessionsPerAccount > 0) shouldBe true
+            (storage.completeIdleTtlSeconds > 0) shouldBe true
+            (storage.accountRateLimit > 0) shouldBe true
+            (storage.accountRateLimitWindowSeconds > 0) shouldBe true
         }
     }
 
