@@ -291,11 +291,16 @@ class UploadSessionRepo @Inject constructor(
                 partFile.moveTo(blobFile, overwrite = true)
             }
 
+            // After finalize the only legitimate next step is the client's module PUT — there is
+            // no slow-network upload reason to keep the session for the full ACTIVE-state idle TTL.
+            // Shorten the idle window so cancel-after-finalize / client-crash orphans are reaped
+            // within minutes instead of an hour. A periodic GC tick still applies on top of this.
             val updatedMeta = meta.copy(
                 state = UploadSessionMeta.State.COMPLETE,
                 hashAlgorithm = effectiveAlgorithm,
                 hashHex = effectiveHex,
                 lastActivityAt = Instant.now(),
+                idleTtlSeconds = COMPLETE_IDLE_TTL_SECONDS,
             )
             persistSessionMeta(state.sessionDir, updatedMeta)
             sessions[sessionId] = state.copy(meta = updatedMeta)
@@ -453,6 +458,14 @@ class UploadSessionRepo @Inject constructor(
         internal const val PART_FILENAME = "payload.part"
         internal const val BLOB_FILENAME = "payload.blob"
         internal const val SESSION_META_FILENAME = "session.json"
+
+        /**
+         * Idle TTL applied when a session transitions to COMPLETE. After finalize, the only
+         * outstanding step is the client's module PUT — no slow-network rationale applies, so
+         * the long ACTIVE-state TTL is over-conservative.
+         */
+        internal const val COMPLETE_IDLE_TTL_SECONDS = 600L
+
         private val TAG = logTag("Upload", "Session", "Repo")
     }
 }

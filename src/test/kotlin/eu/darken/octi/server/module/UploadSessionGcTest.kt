@@ -2,6 +2,8 @@ package eu.darken.octi.server.module
 
 import eu.darken.octi.TestRunner
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.shouldNotBe
+import io.kotest.matchers.types.shouldBeInstanceOf
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import java.time.Instant
@@ -138,6 +140,67 @@ class UploadSessionGcTest : TestRunner() {
 
             runBlocking { component.sessionRepo().reapExpiredSessions() }
 
+            component.storageTracker().getUsage(accountId).reservedBytes shouldBe 0
+            sessionDirPath.toFile().exists() shouldBe false
+        }
+    }
+
+    @Test
+    fun `finalize shortens idle TTL so a quiet COMPLETE session reaps in minutes, not hours`() {
+        val accountId = UUID.randomUUID()
+        val deviceId = UUID.randomUUID()
+        val moduleId = "eu.darken.octi.gc.completeshortidle"
+
+        runTest2(seed = { cfg -> seedAccountDeviceFor(accountId, deviceId)(cfg.dataPath) }) {
+            component.storageTracker().tryReserve(accountId, 100) shouldBe true
+            val session = component.sessionRepo().createSession(
+                accountId = accountId, deviceId = deviceId, moduleId = moduleId,
+                expectedSizeBytes = 100, hashAlgorithm = null, hashHex = null,
+            )
+            val sessionDirPath = BlobFixtures.sessionDir(
+                BlobFixtures.moduleDir(config.dataPath, accountId, deviceId, moduleId),
+                session.sessionId,
+            )
+
+            // Pre-stage payload.part on disk and swap the in-memory meta to offsetBytes=100 so
+            // finalizeSession's offset check passes without going through PATCH (which requires
+            // a real ByteReadChannel and is overkill for a TTL test).
+            val payload = ByteArray(100)
+            sessionDirPath.resolve(UploadSessionRepo.PART_FILENAME).toFile().writeBytes(payload)
+            val sha = run {
+                val md = java.security.MessageDigest.getInstance("SHA-256")
+                md.update(payload)
+                md.digest().joinToString("") { "%02x".format(it) }
+            }
+            component.sessionRepo().loadSession(session.copy(offsetBytes = 100), sessionDirPath)
+
+            val finalizeResult = runBlocking {
+                component.sessionRepo().finalizeSession(
+                    sessionId = session.sessionId,
+                    accountId = accountId,
+                    moduleId = moduleId,
+                    hashAlgorithm = "SHA-256",
+                    hashHex = sha,
+                )
+            }
+            finalizeResult.shouldBeInstanceOf<UploadSessionRepo.FinalizeResult.Success>()
+
+            val completeMeta = component.sessionRepo().getSession(session.sessionId, accountId, moduleId)!!
+            completeMeta.idleTtlSeconds shouldBe UploadSessionRepo.COMPLETE_IDLE_TTL_SECONDS
+
+            // Fresh COMPLETE: not reaped under the shorter idle TTL.
+            runBlocking { component.sessionRepo().reapExpiredSessions() }
+            component.sessionRepo().getSession(session.sessionId, accountId, moduleId) shouldNotBe null
+
+            // Quiet for longer than the shortened idle TTL, but well under the ACTIVE-state TTL.
+            val agedComplete = completeMeta.copy(
+                lastActivityAt = Instant.now().minusSeconds(UploadSessionRepo.COMPLETE_IDLE_TTL_SECONDS + 60),
+            )
+            component.sessionRepo().loadSession(agedComplete, sessionDirPath)
+
+            runBlocking { component.sessionRepo().reapExpiredSessions() }
+
+            component.sessionRepo().getSession(session.sessionId, accountId, moduleId) shouldBe null
             component.storageTracker().getUsage(accountId).reservedBytes shouldBe 0
             sessionDirPath.toFile().exists() shouldBe false
         }
