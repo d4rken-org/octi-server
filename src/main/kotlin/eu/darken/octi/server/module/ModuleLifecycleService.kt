@@ -33,12 +33,14 @@ class ModuleLifecycleService @Inject constructor(
     sealed interface LegacyWriteResult {
         data class Success(val meta: ModuleMeta) : LegacyWriteResult
         data object BlobBacked : LegacyWriteResult
+        data object QuotaExceeded : LegacyWriteResult
     }
 
     sealed interface CommitResult {
         data class Success(val etag: String) : CommitResult
         data class PreconditionFailed(val message: String) : CommitResult
         data class BadRequest(val message: String) : CommitResult
+        data object QuotaExceeded : CommitResult
     }
 
     sealed interface DeleteBlobResult {
@@ -50,7 +52,9 @@ class ModuleLifecycleService @Inject constructor(
 
     /**
      * Legacy POST write — under device lock, loads old meta, rejects if blob-backed,
-     * writes payload, adjusts quota, aborts scoped sessions.
+     * pre-checks the document quota delta, writes payload, settles quota, aborts
+     * scoped sessions. Quota is reserved before disk I/O so a write that would
+     * exceed the cap returns 507 without touching the filesystem.
      */
     suspend fun legacyWrite(
         caller: Device,
@@ -65,9 +69,19 @@ class ModuleLifecycleService @Inject constructor(
             }
 
             val oldDocSize = oldMeta?.documentSizeBytes ?: 0L
-            val newMeta = moduleRepo.writeUnlocked(caller, target, moduleId, write)
-            val delta = newMeta.documentSizeBytes - oldDocSize
-            if (delta != 0L) {
+            val delta = write.size.toLong() - oldDocSize
+            if (delta > 0 && !storageTracker.tryAdjustUsed(caller.accountId, delta)) {
+                return@withLock LegacyWriteResult.QuotaExceeded
+            }
+
+            val newMeta = try {
+                moduleRepo.writeUnlocked(caller, target, moduleId, write)
+            } catch (e: Exception) {
+                if (delta > 0) storageTracker.adjustUsed(caller.accountId, -delta)
+                throw e
+            }
+            // Negative delta (smaller payload) is freed only after write succeeds.
+            if (delta < 0) {
                 storageTracker.adjustUsed(caller.accountId, delta)
             }
 
@@ -183,108 +197,123 @@ class ModuleLifecycleService @Inject constructor(
             }
             if (error != null) return@withLock CommitResult.PreconditionFailed(error) to emptyList<Path>()
 
-            val modulePath = moduleRepo.resolveModulePath(target, moduleId)
-
-            // Ensure directory exists so new blobs can be moved in place during resolution.
-            modulePath.apply {
-                if (!parent.exists()) parent.createDirectory()
-                if (!exists()) createDirectory()
-            }
-
-            // Resolve blob refs and move new blobs into the live dir in one pass. One session-map
-            // scan per new blob instead of two (previously: meta lookup + file lookup).
-            val newBlobRefs = mutableListOf<BlobRef>()
-            for (blobId in blobRefIds) {
-                val existingRef = existingMeta?.blobRefs?.find { it.blobId == blobId }
-                if (existingRef != null) {
-                    newBlobRefs.add(existingRef)
-                    continue
-                }
-                val consumed = sessionRepo.consumeCompletedBlob(blobId, caller.accountId, target.id, moduleId)
-                val (sessionMeta, sessionBlobFile) = when (consumed) {
-                    is UploadSessionRepo.ConsumeResult.Ready -> consumed.meta to consumed.file
-                    UploadSessionRepo.ConsumeResult.SessionNotFound ->
-                        return@withLock CommitResult.BadRequest("Referenced blobId not found: $blobId") to emptyList<Path>()
-                    UploadSessionRepo.ConsumeResult.PayloadMissing ->
-                        return@withLock CommitResult.BadRequest("Staged blob payload missing for $blobId") to emptyList<Path>()
-                }
-                newBlobRefs.add(
-                    BlobRef(
-                        blobId = sessionMeta.blobId,
-                        storageKey = sessionMeta.storageKey,
-                        sizeBytes = sessionMeta.expectedSizeBytes,
-                        hashAlgorithm = sessionMeta.hashAlgorithm,
-                        hashHex = sessionMeta.hashHex,
-                    )
-                )
-                val prefix = sessionMeta.storageKey.take(4)
-                val liveBlobDir = modulePath.resolve("blobs").resolve(prefix).resolve(sessionMeta.storageKey)
-                liveBlobDir.createDirectories()
-                sessionBlobFile.toPath().moveTo(liveBlobDir.resolve("payload.blob"), overwrite = true)
-            }
-
-            // Write payload.blob first, then module.json as commit point
-            val blobFile = modulePath.resolve("payload.blob")
-            val tempBlob = modulePath.resolve("payload.blob.tmp")
-            tempBlob.writeBytes(documentBytes)
-            tempBlob.moveTo(blobFile, overwrite = true)
-
-            val now = Instant.now()
-            val newEtag = ModuleRepo.generateRandomEtag()
-            val meta = ModuleMeta(
-                schemaVersion = 1,
-                moduleId = moduleId,
-                sourceDeviceId = caller.id,
-                etag = newEtag,
-                modifiedAt = now,
-                documentSizeBytes = documentBytes.size.toLong(),
-                blobRefs = newBlobRefs,
-            )
-
-            val metaFile = modulePath.resolve("module.json")
-            val tempMeta = modulePath.resolve("module.json.tmp")
-            tempMeta.writeText(json.encodeToString(meta))
-            tempMeta.moveTo(metaFile, overwrite = true)
-
-            // Update access metadata
-            val accessFile = modulePath.resolve("access.json")
-            val tempAccess = modulePath.resolve("access.json.tmp")
-            tempAccess.writeText(json.encodeToString(AccessMeta(lastAccessedAt = now)))
-            tempAccess.moveTo(accessFile, overwrite = true)
-
-            // Clean up committed sessions
-            for (ref in newBlobRefs) {
-                if (existingMeta?.blobRefs?.any { it.blobId == ref.blobId } != true) {
-                    sessionRepo.removeCommittedSessionByBlobId(ref.blobId)
-                }
-            }
-
-            // Quota update
-            val newReferencedBytes = newBlobRefs.filter { ref ->
-                existingMeta?.blobRefs?.any { it.blobId == ref.blobId } != true
-            }.sumOf { it.sizeBytes }
-            val orphanedBlobRefs = existingMeta?.blobRefs
-                ?.filter { old -> newBlobRefs.none { it.blobId == old.blobId } }
-                ?: emptyList()
-            val orphanedBytes = orphanedBlobRefs.sumOf { it.sizeBytes }
+            // Pre-check the document delta against quota *before* any disk I/O. Blob bytes are
+            // already reserved at session creation; only the document needs an at-commit check.
             val docDelta = documentBytes.size.toLong() - (existingMeta?.documentSizeBytes ?: 0L)
-
-            if (newReferencedBytes > 0 || orphanedBytes > 0) {
-                storageTracker.commitReservation(caller.accountId, newReferencedBytes, orphanedBytes)
+            if (docDelta > 0 && !storageTracker.tryAdjustUsed(caller.accountId, docDelta)) {
+                return@withLock CommitResult.QuotaExceeded to emptyList<Path>()
             }
-            if (docDelta != 0L) {
-                storageTracker.adjustUsed(caller.accountId, docDelta)
-            }
+            var rollbackDocDelta = docDelta > 0
 
-            // Collect orphaned blob paths for async deletion outside the lock —
-            // deleting here would block every concurrent read/write for large orphans.
-            val orphansToDelete = orphanedBlobRefs.map { orphan ->
-                val prefix = orphan.storageKey.take(4)
-                modulePath.resolve("blobs").resolve(prefix).resolve(orphan.storageKey)
-            }
+            try {
+                val modulePath = moduleRepo.resolveModulePath(target, moduleId)
 
-            log(TAG) { "commitModule(${caller.id.shortId()}): $moduleId committed, etag=$newEtag" }
-            CommitResult.Success(newEtag) to orphansToDelete
+                // Ensure directory exists so new blobs can be moved in place during resolution.
+                modulePath.apply {
+                    if (!parent.exists()) parent.createDirectory()
+                    if (!exists()) createDirectory()
+                }
+
+                // Resolve blob refs and move new blobs into the live dir in one pass. One session-map
+                // scan per new blob instead of two (previously: meta lookup + file lookup).
+                val newBlobRefs = mutableListOf<BlobRef>()
+                for (blobId in blobRefIds) {
+                    val existingRef = existingMeta?.blobRefs?.find { it.blobId == blobId }
+                    if (existingRef != null) {
+                        newBlobRefs.add(existingRef)
+                        continue
+                    }
+                    val consumed = sessionRepo.consumeCompletedBlob(blobId, caller.accountId, target.id, moduleId)
+                    val (sessionMeta, sessionBlobFile) = when (consumed) {
+                        is UploadSessionRepo.ConsumeResult.Ready -> consumed.meta to consumed.file
+                        UploadSessionRepo.ConsumeResult.SessionNotFound ->
+                            return@withLock CommitResult.BadRequest("Referenced blobId not found: $blobId") to emptyList<Path>()
+                        UploadSessionRepo.ConsumeResult.PayloadMissing ->
+                            return@withLock CommitResult.BadRequest("Staged blob payload missing for $blobId") to emptyList<Path>()
+                    }
+                    newBlobRefs.add(
+                        BlobRef(
+                            blobId = sessionMeta.blobId,
+                            storageKey = sessionMeta.storageKey,
+                            sizeBytes = sessionMeta.expectedSizeBytes,
+                            hashAlgorithm = sessionMeta.hashAlgorithm,
+                            hashHex = sessionMeta.hashHex,
+                        )
+                    )
+                    val prefix = sessionMeta.storageKey.take(4)
+                    val liveBlobDir = modulePath.resolve("blobs").resolve(prefix).resolve(sessionMeta.storageKey)
+                    liveBlobDir.createDirectories()
+                    sessionBlobFile.toPath().moveTo(liveBlobDir.resolve("payload.blob"), overwrite = true)
+                }
+
+                // Write payload.blob first, then module.json as commit point
+                val blobFile = modulePath.resolve("payload.blob")
+                val tempBlob = modulePath.resolve("payload.blob.tmp")
+                tempBlob.writeBytes(documentBytes)
+                tempBlob.moveTo(blobFile, overwrite = true)
+
+                val now = Instant.now()
+                val newEtag = ModuleRepo.generateRandomEtag()
+                val meta = ModuleMeta(
+                    schemaVersion = 1,
+                    moduleId = moduleId,
+                    sourceDeviceId = caller.id,
+                    etag = newEtag,
+                    modifiedAt = now,
+                    documentSizeBytes = documentBytes.size.toLong(),
+                    blobRefs = newBlobRefs,
+                )
+
+                val metaFile = modulePath.resolve("module.json")
+                val tempMeta = modulePath.resolve("module.json.tmp")
+                tempMeta.writeText(json.encodeToString(meta))
+                tempMeta.moveTo(metaFile, overwrite = true)
+
+                // Update access metadata
+                val accessFile = modulePath.resolve("access.json")
+                val tempAccess = modulePath.resolve("access.json.tmp")
+                tempAccess.writeText(json.encodeToString(AccessMeta(lastAccessedAt = now)))
+                tempAccess.moveTo(accessFile, overwrite = true)
+
+                // Clean up committed sessions
+                for (ref in newBlobRefs) {
+                    if (existingMeta?.blobRefs?.any { it.blobId == ref.blobId } != true) {
+                        sessionRepo.removeCommittedSessionByBlobId(ref.blobId)
+                    }
+                }
+
+                // Quota update for blobs and shrinking documents. Positive doc delta was
+                // already applied by tryAdjustUsed above.
+                val newReferencedBytes = newBlobRefs.filter { ref ->
+                    existingMeta?.blobRefs?.any { it.blobId == ref.blobId } != true
+                }.sumOf { it.sizeBytes }
+                val orphanedBlobRefs = existingMeta?.blobRefs
+                    ?.filter { old -> newBlobRefs.none { it.blobId == old.blobId } }
+                    ?: emptyList()
+                val orphanedBytes = orphanedBlobRefs.sumOf { it.sizeBytes }
+
+                if (newReferencedBytes > 0 || orphanedBytes > 0) {
+                    storageTracker.commitReservation(caller.accountId, newReferencedBytes, orphanedBytes)
+                }
+                if (docDelta < 0) {
+                    storageTracker.adjustUsed(caller.accountId, docDelta)
+                }
+                rollbackDocDelta = false
+
+                // Collect orphaned blob paths for async deletion outside the lock —
+                // deleting here would block every concurrent read/write for large orphans.
+                val orphansToDelete = orphanedBlobRefs.map { orphan ->
+                    val prefix = orphan.storageKey.take(4)
+                    modulePath.resolve("blobs").resolve(prefix).resolve(orphan.storageKey)
+                }
+
+                log(TAG) { "commitModule(${caller.id.shortId()}): $moduleId committed, etag=$newEtag" }
+                CommitResult.Success(newEtag) to orphansToDelete
+            } finally {
+                if (rollbackDocDelta) {
+                    storageTracker.adjustUsed(caller.accountId, -docDelta)
+                }
+            }
         }
 
         // Fire-and-forget orphan cleanup on AppScope. StartupRecoveryService sweeps any

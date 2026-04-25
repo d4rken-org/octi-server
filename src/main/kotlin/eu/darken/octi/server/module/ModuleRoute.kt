@@ -169,6 +169,10 @@ class ModuleRoute @Inject constructor(
                 call.respond(HttpStatusCode.Conflict, "Module has external blob refs, use PUT commit instead")
                 return
             }
+            is ModuleLifecycleService.LegacyWriteResult.QuotaExceeded -> {
+                call.respond(HttpStatusCode.InsufficientStorage, "Account storage quota exceeded")
+                return
+            }
             is ModuleLifecycleService.LegacyWriteResult.Success -> {
                 call.response.header("ETag", "\"${result.meta.etag}\"")
                 call.respond(HttpStatusCode.OK).also {
@@ -269,6 +273,10 @@ class ModuleRoute @Inject constructor(
             }
             is ModuleLifecycleService.CommitResult.BadRequest -> {
                 call.respond(HttpStatusCode.BadRequest, result.message)
+                return
+            }
+            is ModuleLifecycleService.CommitResult.QuotaExceeded -> {
+                call.respond(HttpStatusCode.InsufficientStorage, "Account storage quota exceeded")
                 return
             }
             is ModuleLifecycleService.CommitResult.Success -> {

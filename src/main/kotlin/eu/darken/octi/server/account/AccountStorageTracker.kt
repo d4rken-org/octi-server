@@ -84,7 +84,9 @@ class AccountStorageTracker @Inject constructor(
     }
 
     /**
-     * Adjusts used bytes directly (e.g., legacy write/delete).
+     * Adjusts used bytes directly (e.g., legacy delete, post-write rollback).
+     * No quota check — callers must use [tryAdjustUsed] for positive deltas
+     * that should respect [App.Config.accountQuotaBytes].
      */
     fun adjustUsed(accountId: AccountId, delta: Long) {
         synchronized(quotaLock) {
@@ -92,6 +94,28 @@ class AccountStorageTracker @Inject constructor(
             usageMap[accountId] = current.copy(
                 usedBytes = maxOf(0, current.usedBytes + delta)
             )
+        }
+    }
+
+    /**
+     * Atomic check-and-apply for an absolute bytes adjustment. Positive deltas
+     * are rejected if they would push `usedBytes + reservedBytes` over the
+     * configured quota; non-positive deltas are always applied. Returned
+     * boolean reports whether the delta was applied.
+     */
+    fun tryAdjustUsed(accountId: AccountId, delta: Long): Boolean {
+        return synchronized(quotaLock) {
+            val current = usageMap.getOrDefault(accountId, AccountUsage())
+            if (delta > 0 && current.totalBytes + delta > config.accountQuotaBytes) {
+                log(TAG) { "tryAdjustUsed($accountId): rejected, delta=$delta, used=${current.usedBytes}, reserved=${current.reservedBytes}, quota=${config.accountQuotaBytes}" }
+                false
+            } else {
+                usageMap[accountId] = current.copy(
+                    usedBytes = maxOf(0, current.usedBytes + delta)
+                )
+                log(TAG, VERBOSE) { "tryAdjustUsed($accountId): applied=$delta" }
+                true
+            }
         }
     }
 

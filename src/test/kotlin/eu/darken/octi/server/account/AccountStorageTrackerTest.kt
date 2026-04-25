@@ -148,6 +148,58 @@ class AccountStorageTrackerTest {
     }
 
     @Test
+    fun `tryAdjustUsed accepts positive delta within quota and rejects past it`() {
+        val t = tracker(quota = 1024)
+        val a = UUID.randomUUID()
+
+        t.tryAdjustUsed(a, 500) shouldBe true
+        t.getUsage(a).usedBytes shouldBe 500
+
+        t.tryAdjustUsed(a, 524) shouldBe true
+        t.getUsage(a).usedBytes shouldBe 1024
+
+        t.tryAdjustUsed(a, 1) shouldBe false
+        t.getUsage(a).usedBytes shouldBe 1024
+    }
+
+    @Test
+    fun `tryAdjustUsed counts reservedBytes against quota`() {
+        val t = tracker(quota = 1024)
+        val a = UUID.randomUUID()
+
+        t.tryReserve(a, 800) shouldBe true
+        // 224 bytes free (1024 - 800 reserved); a 300-byte doc must be rejected.
+        t.tryAdjustUsed(a, 300) shouldBe false
+        t.getUsage(a).usedBytes shouldBe 0
+    }
+
+    @Test
+    fun `tryAdjustUsed always applies non-positive deltas without quota check`() {
+        val t = tracker(quota = 100)
+        val a = UUID.randomUUID()
+
+        t.adjustUsed(a, 100)
+
+        // Negative delta — frees space, no check needed.
+        t.tryAdjustUsed(a, -40) shouldBe true
+        t.getUsage(a).usedBytes shouldBe 60
+
+        // Zero delta — no-op success.
+        t.tryAdjustUsed(a, 0) shouldBe true
+        t.getUsage(a).usedBytes shouldBe 60
+    }
+
+    @Test
+    fun `tryAdjustUsed negative delta clamps used to zero`() {
+        val t = tracker()
+        val a = UUID.randomUUID()
+
+        t.adjustUsed(a, 50)
+        t.tryAdjustUsed(a, -9999) shouldBe true
+        t.getUsage(a).usedBytes shouldBe 0
+    }
+
+    @Test
     fun `concurrent tryReserve up to quota never oversells`() = runBlocking {
         val quota = 10_000L
         val t = tracker(quota = quota)
