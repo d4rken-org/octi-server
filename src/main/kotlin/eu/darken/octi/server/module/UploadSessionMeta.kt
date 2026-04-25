@@ -28,10 +28,10 @@ data class UploadSessionMeta(
     val state: State,
 ) {
     @Serializable
-    enum class State { ACTIVE, UPLOADED, COMPLETE, ABORTED, EXPIRED }
+    enum class State { ACTIVE, COMPLETE, ABORTED }
 
     fun isExpired(now: Instant = Instant.now()): Boolean {
-        if (state == State.ABORTED || state == State.EXPIRED) return true
+        if (state == State.ABORTED) return true
         // Absolute expiry
         if (now.isAfter(expiresAt)) return true
         // Idle expiry

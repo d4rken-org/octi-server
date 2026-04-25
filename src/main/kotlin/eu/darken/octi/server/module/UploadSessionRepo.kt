@@ -257,7 +257,7 @@ class UploadSessionRepo @Inject constructor(
                 return@withLock FinalizeResult.AlreadyComplete(meta.blobId, meta.expectedSizeBytes)
             }
 
-            if (meta.state != UploadSessionMeta.State.ACTIVE && meta.state != UploadSessionMeta.State.UPLOADED) {
+            if (meta.state != UploadSessionMeta.State.ACTIVE) {
                 return@withLock FinalizeResult.SessionNotFound
             }
 
@@ -333,7 +333,7 @@ class UploadSessionRepo @Inject constructor(
         } catch (e: Exception) {
             log(TAG, WARN) { "terminateSession(${meta.sessionId}): failed to delete dir: ${e.message}" }
         }
-        if (meta.expectedSizeBytes > 0 && meta.state != UploadSessionMeta.State.ABORTED && meta.state != UploadSessionMeta.State.EXPIRED) {
+        if (meta.expectedSizeBytes > 0 && meta.state != UploadSessionMeta.State.ABORTED) {
             storageTracker.releaseReservation(meta.accountId, meta.expectedSizeBytes)
         }
         log(TAG) { "terminateSession(${meta.sessionId}): $reason" }
