@@ -20,6 +20,7 @@ class StartupRecoveryService @Inject constructor(
     private val config: App.Config,
     private val storageTracker: AccountStorageTracker,
     private val sessionRepo: UploadSessionRepo,
+    private val moduleRepo: ModuleRepo,
     private val deviceRepo: DeviceRepo,
     private val json: Json,
 ) {
@@ -62,38 +63,10 @@ class StartupRecoveryService @Inject constructor(
                 }
 
                 modulesDir.listDirectoryEntries().forEach modules@{ moduleDir ->
-                    // Load module metadata and accumulate used bytes
-                    val metaFile = moduleDir.resolve("module.json")
-                    var moduleMeta: ModuleMeta? = null
-                    if (metaFile.exists()) {
-                        try {
-                            val text = metaFile.readText()
-                            if (ModuleRepo.isV1Meta(text)) {
-                                moduleMeta = json.decodeFromString<ModuleMeta>(text)
-                                usedBytes += moduleMeta.documentSizeBytes
-                                for (ref in moduleMeta.blobRefs) {
-                                    usedBytes += ref.sizeBytes
-                                }
-                            } else {
-                                // Legacy metadata — count payload.blob size
-                                val blobFile = moduleDir.resolve("payload.blob")
-                                if (blobFile.exists()) {
-                                    usedBytes += blobFile.fileSize()
-                                }
-                            }
-                        } catch (e: Exception) {
-                            log(TAG, WARN) { "recovery: failed to read module meta at $metaFile: ${e.message}" }
-                            val blobFile = moduleDir.resolve("payload.blob")
-                            if (blobFile.exists()) {
-                                usedBytes += blobFile.fileSize()
-                            }
-                        }
-                    } else {
-                        val blobFile = moduleDir.resolve("payload.blob")
-                        if (blobFile.exists()) {
-                            usedBytes += blobFile.fileSize()
-                        }
-                    }
+                    // Single source of truth for "bytes accounted for"; mirrors ModuleLifecycleService.deleteForDevice.
+                    val accounting = moduleRepo.accountForModule(moduleDir)
+                    usedBytes += accounting.bytes
+                    val moduleMeta: ModuleMeta? = accounting.v1Meta
 
                     // Scan blobs/ for orphans
                     val blobsDir = moduleDir.resolve("blobs")

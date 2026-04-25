@@ -1,7 +1,6 @@
 package eu.darken.octi.server.module
 
 import eu.darken.octi.*
-import io.kotest.matchers.longs.shouldBeGreaterThan
 import io.kotest.matchers.shouldBe
 import io.ktor.client.call.*
 import io.ktor.client.request.*
@@ -139,12 +138,8 @@ class ModuleLifecycleServiceTeardownTest : TestRunner() {
         usage.reservedBytes shouldBe 0
     }
 
-    // If recovery rebuilds usedBytes from on-disk payload.blob in a module with malformed
-    // meta, deleteForDevice iterates only modules where resolveModuleId succeeds. A malformed
-    // module.json means the quota counted at startup won't be rolled back here.
-    // This test documents the divergence; the failing assertion pinpoints the gap for a follow-up.
     @Test
-    fun `DELETE device with malformed module meta leaves quota stranded - documents current gap`() {
+    fun `DELETE device with malformed module meta releases quota`() {
         val accountId = UUID.randomUUID()
         val deviceId = UUID.randomUUID()
         val moduleId = "eu.darken.octi.teardown.malformed"
@@ -157,17 +152,63 @@ class ModuleLifecycleServiceTeardownTest : TestRunner() {
         }) {
             component.storageTracker().getUsage(accountId).usedBytes shouldBe 333
 
-            // The device was never registered via HTTP (we seeded it directly), so we cannot
-            // call DELETE /v1/devices/{id} without auth. Instead, reach the service directly.
+            // Device wasn't registered via HTTP (seeded directly), so reach the service.
             val target = component.deviceRepo().getDevice(
                 eu.darken.octi.server.device.DeviceKey(accountId, deviceId)
             ) ?: error("seeded device not loaded")
             kotlinx.coroutines.runBlocking { component.lifecycleService().deleteForDevice(accountId, target) }
 
-            // deleteForDevice walked modules/ but resolveModuleId returned null for the malformed
-            // entry, so quota was not released for those 333 bytes. Current behaviour:
-            val residual = component.storageTracker().getUsage(accountId).usedBytes
-            residual shouldBeGreaterThan 0  // FIXME: production bug — should be 0.
+            component.storageTracker().getUsage(accountId).usedBytes shouldBe 0
+        }
+    }
+
+    @Test
+    fun `DELETE device with missing module meta releases quota`() {
+        val accountId = UUID.randomUUID()
+        val deviceId = UUID.randomUUID()
+        val moduleId = "eu.darken.octi.teardown.missing"
+
+        runTest2(seed = { cfg ->
+            BlobFixtures.seedAccountDevice(cfg.dataPath, accountId, deviceId)
+            val moduleDir = BlobFixtures.moduleDir(cfg.dataPath, accountId, deviceId, moduleId)
+            BlobFixtures.writeModulePayloadBlob(moduleDir, ByteArray(222))
+            // no module.json at all
+        }) {
+            component.storageTracker().getUsage(accountId).usedBytes shouldBe 222
+
+            val target = component.deviceRepo().getDevice(
+                eu.darken.octi.server.device.DeviceKey(accountId, deviceId)
+            ) ?: error("seeded device not loaded")
+            kotlinx.coroutines.runBlocking { component.lifecycleService().deleteForDevice(accountId, target) }
+
+            component.storageTracker().getUsage(accountId).usedBytes shouldBe 0
+        }
+    }
+
+    @Test
+    fun `DELETE device with legacy v0 meta releases quota`() {
+        val accountId = UUID.randomUUID()
+        val deviceId = UUID.randomUUID()
+        val moduleId = "eu.darken.octi.teardown.legacyv0"
+
+        runTest2(seed = { cfg ->
+            BlobFixtures.seedAccountDevice(cfg.dataPath, accountId, deviceId)
+            val moduleDir = BlobFixtures.moduleDir(cfg.dataPath, accountId, deviceId, moduleId)
+            // Legacy v0 meta — no schemaVersion field; recovery falls back to payload.blob.fileSize().
+            BlobFixtures.writeRawModuleMeta(
+                moduleDir,
+                """{"id":"$moduleId","source":"$deviceId"}"""
+            )
+            BlobFixtures.writeModulePayloadBlob(moduleDir, ByteArray(111))
+        }) {
+            component.storageTracker().getUsage(accountId).usedBytes shouldBe 111
+
+            val target = component.deviceRepo().getDevice(
+                eu.darken.octi.server.device.DeviceKey(accountId, deviceId)
+            ) ?: error("seeded device not loaded")
+            kotlinx.coroutines.runBlocking { component.lifecycleService().deleteForDevice(accountId, target) }
+
+            component.storageTracker().getUsage(accountId).usedBytes shouldBe 0
         }
     }
 

@@ -127,6 +127,35 @@ class ModuleRepo @Inject constructor(
     }
 
     /**
+     * Bytes a module dir contributes to the quota tracker, plus the parsed v1 meta if any.
+     *
+     * Mirrors [StartupRecoveryService]'s accounting rule exactly so recovery and delete
+     * paths agree by construction:
+     *   - v1 `module.json` decodes → `documentSizeBytes + sum(blobRefs.sizeBytes)`, meta returned.
+     *   - missing / malformed / legacy v0 → `payload.blob.fileSize()` if present, else 0; meta null.
+     * Logs WARN on parse failure so the fallback isn't silent.
+     */
+    internal fun accountForModule(moduleDir: Path): ModuleAccounting {
+        val metaFile = moduleDir.resolve(META_FILENAME)
+        if (metaFile.exists()) {
+            try {
+                val text = metaFile.readText()
+                if (isV1Meta(text)) {
+                    val meta = serializer.decodeFromString<ModuleMeta>(text)
+                    val total = meta.documentSizeBytes + meta.blobRefs.sumOf { it.sizeBytes }
+                    return ModuleAccounting(bytes = total, v1Meta = meta)
+                }
+                // Legacy v0 meta: ignore document body declared in meta and count payload.blob.
+            } catch (e: Exception) {
+                log(TAG, WARN) { "accountForModule: failed to parse $metaFile: ${e.message}; falling back to payload.blob" }
+            }
+        }
+        val blob = moduleDir.resolve(BLOB_FILENAME)
+        val bytes = if (blob.exists()) blob.fileSize() else 0L
+        return ModuleAccounting(bytes = bytes, v1Meta = null)
+    }
+
+    /**
      * Attempts to reverse-map a module directory path back to its moduleId.
      * Returns null if the directory name doesn't correspond to a known module.
      * This is best-effort — the SHA-1 hash isn't reversible, so we read module.json.
@@ -647,6 +676,15 @@ sealed interface RemoveBlobRefResult {
     data object BlobNotFound : RemoveBlobRefResult
     data class EtagMismatch(val currentEtag: String) : RemoveBlobRefResult
 }
+
+/**
+ * Result of [ModuleRepo.accountForModule]. Carries the byte total for quota accounting plus
+ * the decoded v1 meta if present, so callers (recovery) can avoid a second read of module.json.
+ */
+internal data class ModuleAccounting(
+    val bytes: Long,
+    val v1Meta: ModuleMeta?,
+)
 
 /**
  * Already-open handle to a live blob. Caller owns [stream] and must close it.

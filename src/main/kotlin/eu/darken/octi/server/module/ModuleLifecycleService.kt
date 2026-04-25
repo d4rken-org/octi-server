@@ -307,21 +307,19 @@ class ModuleLifecycleService @Inject constructor(
 
     /**
      * Deletes all modules for a device, adjusts quota, aborts sessions.
+     *
+     * Aggregate bytes first via the same accounting helper recovery uses, then delete files,
+     * then adjust quota once. This keeps quota and disk in agreement even when a module's
+     * `module.json` is malformed or missing — recovery's payload.blob fallback applies here too.
      */
     suspend fun deleteForDevice(accountId: AccountId, target: Device) {
         target.sync.withLock {
-            // Calculate total used bytes before deletion
             val modulesPath = target.path.resolve("modules")
-            if (modulesPath.exists()) {
-                modulesPath.listDirectoryEntries().forEach { moduleDir ->
-                    val meta = moduleRepo.loadMeta(target, resolveModuleId(moduleDir) ?: return@forEach)
-                    if (meta != null) {
-                        val total = meta.documentSizeBytes + meta.blobRefs.sumOf { it.sizeBytes }
-                        if (total > 0) storageTracker.adjustUsed(accountId, -total)
-                    }
-                }
-            }
+            val totalBytes = if (modulesPath.exists()) {
+                modulesPath.listDirectoryEntries().sumOf { moduleRepo.accountForModule(it).bytes }
+            } else 0L
             moduleRepo.clearUnlocked(target)
+            if (totalBytes > 0) storageTracker.adjustUsed(accountId, -totalBytes)
         }
         sessionRepo.abortSessionsForDevice(accountId, target.id)
     }
@@ -332,21 +330,6 @@ class ModuleLifecycleService @Inject constructor(
     suspend fun deleteForAccount(accountId: AccountId) {
         sessionRepo.abortSessionsForAccount(accountId)
         storageTracker.removeAccount(accountId)
-    }
-
-    private fun resolveModuleId(moduleDir: java.nio.file.Path): String? {
-        val metaFile = moduleDir.resolve("module.json")
-        if (!metaFile.exists()) return null
-        return try {
-            val text = metaFile.readText()
-            if (ModuleRepo.isV1Meta(text)) {
-                json.decodeFromString<ModuleMeta>(text).moduleId
-            } else {
-                json.decodeFromString<Module.Info>(text).id
-            }
-        } catch (e: Exception) {
-            null
-        }
     }
 
     companion object {
