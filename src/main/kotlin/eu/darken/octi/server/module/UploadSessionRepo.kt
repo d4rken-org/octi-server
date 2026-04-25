@@ -338,11 +338,38 @@ class UploadSessionRepo @Inject constructor(
         } catch (e: Exception) {
             log(TAG, WARN) { "terminateSession(${meta.sessionId}): failed to delete dir: ${e.message}" }
         }
+        // Sweep the parent sessions/ and modules/{hash}/ dirs if they're now empty.
+        // createSession created modules/{hash}/ as a side effect; without this sweep an
+        // attacker spamming sessions for distinct moduleIds would leave behind one empty
+        // module dir per session and pile up dirents.
+        cleanupEmptyParentsAfterSession(state.sessionDir)
         if (meta.expectedSizeBytes > 0 && meta.state != UploadSessionMeta.State.ABORTED) {
             storageTracker.releaseReservation(meta.accountId, meta.expectedSizeBytes)
         }
         log(TAG) { "terminateSession(${meta.sessionId}): $reason" }
         return meta
+    }
+
+    private fun cleanupEmptyParentsAfterSession(sessionDir: Path) {
+        // Walk up two levels: sessions/ then modules/{hash}/. Stop on first non-empty parent.
+        val sessionsDir = sessionDir.parent ?: return
+        if (!deleteIfEmpty(sessionsDir)) return
+        val moduleDir = sessionsDir.parent ?: return
+        deleteIfEmpty(moduleDir)
+    }
+
+    private fun deleteIfEmpty(dir: Path): Boolean {
+        return try {
+            if (!dir.exists()) return true
+            if (dir.listDirectoryEntries().isNotEmpty()) return false
+            dir.deleteIfExists()
+            true
+        } catch (e: Exception) {
+            // DirectoryNotEmptyException can happen if a sibling created a child between
+            // our check and delete. Either way, leaving the dir is acceptable.
+            log(TAG, VERBOSE) { "deleteIfEmpty($dir): ${e.message}" }
+            false
+        }
     }
 
     /**
