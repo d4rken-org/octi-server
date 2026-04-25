@@ -60,6 +60,8 @@ class App @Inject constructor(
         val idleSessionTtlSeconds: Long = 3600, // 1 hour
         val absoluteSessionTtlSeconds: Long = 86400, // 24 hours
         val maxBlobPatchBytes: Long = 1L * 1024 * 1024, // 1 MB per chunk
+        // Count caps — bound dirent/inode growth that quota alone cannot reach.
+        val maxDevicesPerAccount: Int = 64,
     )
 
     companion object {

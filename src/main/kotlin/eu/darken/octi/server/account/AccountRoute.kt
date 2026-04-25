@@ -11,6 +11,7 @@ import eu.darken.octi.server.common.debug.logging.shortId
 import eu.darken.octi.server.common.headerDeviceId
 import eu.darken.octi.server.common.normalizeLabel
 import eu.darken.octi.server.common.verifyCaller
+import eu.darken.octi.server.device.DeviceLimitExceededException
 import eu.darken.octi.server.device.DeviceRepo
 import eu.darken.octi.server.device.deviceCredentials
 import eu.darken.octi.server.module.ModuleLifecycleService
@@ -116,6 +117,13 @@ class AccountRoute @Inject constructor(
                 platform = call.request.headers["Octi-Device-Platform"],
                 label = normalizeLabel(call.request.headers["Octi-Device-Label"]),
             )
+        } catch (e: DeviceLimitExceededException) {
+            if (share != null) {
+                log(TAG, INFO) { "create(${deviceId.shortId()}): Device limit exceeded, restoring share" }
+                shareRepo.restoreShare(share)
+            }
+            call.respond(HttpStatusCode.Conflict, "Device limit reached (max ${e.limit} per account)")
+            return
         } catch (e: Exception) {
             if (share != null) {
                 log(TAG, ERROR) { "create(${deviceId.shortId()}): Device creation failed, restoring share: ${e.asLog()}" }

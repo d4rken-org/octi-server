@@ -127,6 +127,12 @@ class DeviceRepo @Inject constructor(
             if (devices.values.any { it.id == device.id }) {
                 throw IllegalStateException("Device ID already registered to another account: ${device.id}")
             }
+            // Count cap is enforced under the same mutex that registers the new device,
+            // so two concurrent creates can't both pass the check.
+            val currentDeviceCount = devices.values.count { it.accountId == account.id }
+            if (currentDeviceCount >= config.maxDevicesPerAccount) {
+                throw DeviceLimitExceededException(config.maxDevicesPerAccount)
+            }
 
             device.path.run {
                 if (!parent.exists()) {
@@ -206,3 +212,6 @@ class DeviceRepo @Inject constructor(
         private val TAG = logTag("Device", "Repo")
     }
 }
+
+class DeviceLimitExceededException(val limit: Int) :
+    RuntimeException("Device limit exceeded: max $limit per account")
