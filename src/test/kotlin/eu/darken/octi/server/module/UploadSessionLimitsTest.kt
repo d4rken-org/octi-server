@@ -99,6 +99,82 @@ class UploadSessionLimitsTest : TestRunner() {
     }
 
     @Test
+    fun `COMPLETE sessions count toward the per-device cap`() {
+        val accountId = UUID.randomUUID()
+        val deviceId = UUID.randomUUID()
+        val moduleId = "eu.darken.octi.limits.complete"
+
+        runTest2(seed = { cfg -> BlobFixtures.seedAccountDevice(cfg.dataPath, accountId, deviceId) }) {
+            val cap = config.maxActiveUploadSessionsPerDevice
+
+            // Create cap zero-byte sessions and finalize them all to COMPLETE state.
+            // Pre-fix only ACTIVE counted, so this would have allowed unlimited create-finalize cycles.
+            repeat(cap) {
+                val session = component.sessionRepo().createSession(
+                    accountId = accountId, deviceId = deviceId, moduleId = moduleId,
+                    expectedSizeBytes = 0, hashAlgorithm = null, hashHex = null,
+                )
+                runBlocking {
+                    component.sessionRepo().finalizeSession(
+                        sessionId = session.sessionId,
+                        accountId = accountId,
+                        moduleId = moduleId,
+                        hashAlgorithm = "sha256",
+                        // SHA-256 of empty input.
+                        hashHex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    )
+                }
+            }
+
+            // All sessions are now COMPLETE — must still count toward cap.
+            shouldThrow<SessionLimitExceededException> {
+                component.sessionRepo().createSession(
+                    accountId = accountId, deviceId = deviceId, moduleId = moduleId,
+                    expectedSizeBytes = 0, hashAlgorithm = null, hashHex = null,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `per-account cap fires when sessions are spread across devices`() {
+        val accountId = UUID.randomUUID()
+        val deviceA = UUID.randomUUID()
+        val deviceB = UUID.randomUUID()
+        val moduleId = "eu.darken.octi.limits.peraccount"
+
+        runTest2(
+            appConfig = baseConfig.copy(
+                maxActiveUploadSessionsPerAccount = 2,
+                maxActiveUploadSessionsPerDevice = 8, // higher than account cap, so account cap bites first
+            ),
+            seed = { cfg ->
+                BlobFixtures.seedAccountDevice(cfg.dataPath, accountId, deviceA)
+                BlobFixtures.writeDevice(cfg.dataPath, accountId, deviceB)
+            },
+        ) {
+            // 1 session on each device — account total = 2, hits account cap.
+            component.sessionRepo().createSession(
+                accountId = accountId, deviceId = deviceA, moduleId = moduleId,
+                expectedSizeBytes = 0, hashAlgorithm = null, hashHex = null,
+            )
+            component.sessionRepo().createSession(
+                accountId = accountId, deviceId = deviceB, moduleId = moduleId,
+                expectedSizeBytes = 0, hashAlgorithm = null, hashHex = null,
+            )
+
+            // Third session on either device — account cap rejects.
+            val ex = shouldThrow<SessionLimitExceededException> {
+                component.sessionRepo().createSession(
+                    accountId = accountId, deviceId = deviceA, moduleId = moduleId,
+                    expectedSizeBytes = 0, hashAlgorithm = null, hashHex = null,
+                )
+            }
+            ex.limit shouldBe 2
+        }
+    }
+
+    @Test
     fun `cap is per-device, not per-account`() {
         val accountId = UUID.randomUUID()
         val deviceA = UUID.randomUUID()

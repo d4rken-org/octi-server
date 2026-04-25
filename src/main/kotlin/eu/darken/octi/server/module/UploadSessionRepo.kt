@@ -108,13 +108,23 @@ class UploadSessionRepo @Inject constructor(
         hashAlgorithm: String?,
         hashHex: String?,
     ): UploadSessionMeta {
-        // Enforce session limit per device
-        val activeCount = sessions.values.count {
-            it.meta.accountId == accountId && it.meta.deviceId == deviceId
-                && it.meta.state == UploadSessionMeta.State.ACTIVE
-                && !it.meta.isExpired()
+        // Both ACTIVE and COMPLETE sessions count toward the cap. COMPLETE sessions still
+        // hold reservedBytes until their PUT-commit (or expiry), and pre-fix only ACTIVE was
+        // counted — letting an attacker create-finalize-repeat to accumulate COMPLETE.
+        val countsTowardCap: (SessionState) -> Boolean = { s ->
+            (s.meta.state == UploadSessionMeta.State.ACTIVE || s.meta.state == UploadSessionMeta.State.COMPLETE)
+                && !s.meta.isExpired()
         }
-        if (activeCount >= config.maxActiveUploadSessionsPerDevice) {
+        val perAccountCount = sessions.values.count {
+            it.meta.accountId == accountId && countsTowardCap(it)
+        }
+        if (perAccountCount >= config.maxActiveUploadSessionsPerAccount) {
+            throw SessionLimitExceededException(config.maxActiveUploadSessionsPerAccount)
+        }
+        val perDeviceCount = sessions.values.count {
+            it.meta.accountId == accountId && it.meta.deviceId == deviceId && countsTowardCap(it)
+        }
+        if (perDeviceCount >= config.maxActiveUploadSessionsPerDevice) {
             throw SessionLimitExceededException(config.maxActiveUploadSessionsPerDevice)
         }
 

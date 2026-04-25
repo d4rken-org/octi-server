@@ -57,6 +57,7 @@ class App @Inject constructor(
         val maxBlobBytes: Long = 10L * 1024 * 1024, // 10 MB default
         val maxModuleDocumentBytes: Long = 256L * 1024, // 256 KB default
         val maxActiveUploadSessionsPerDevice: Int = 8,
+        val maxActiveUploadSessionsPerAccount: Int = 32,
         val idleSessionTtlSeconds: Long = 3600, // 1 hour
         val absoluteSessionTtlSeconds: Long = 86400, // 24 hours
         val maxBlobPatchBytes: Long = 1L * 1024 * 1024, // 1 MB per chunk
