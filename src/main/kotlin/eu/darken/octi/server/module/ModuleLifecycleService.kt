@@ -214,8 +214,9 @@ class ModuleLifecycleService @Inject constructor(
                     if (!exists()) createDirectory()
                 }
 
-                // Resolve blob refs and move new blobs into the live dir in one pass. One session-map
-                // scan per new blob instead of two (previously: meta lookup + file lookup).
+                // Resolve blob refs. The staged payload move is done atomically inside the
+                // session lock by consumeAndMoveCompletedBlob — see its docstring for the race
+                // it closes (GC reaping the session between lookup and move).
                 val newBlobRefs = mutableListOf<BlobRef>()
                 for (blobId in blobRefIds) {
                     val existingRef = existingMeta?.blobRefs?.find { it.blobId == blobId }
@@ -223,9 +224,17 @@ class ModuleLifecycleService @Inject constructor(
                         newBlobRefs.add(existingRef)
                         continue
                     }
-                    val consumed = sessionRepo.consumeCompletedBlob(blobId, caller.accountId, target.id, moduleId)
-                    val (sessionMeta, sessionBlobFile) = when (consumed) {
-                        is UploadSessionRepo.ConsumeResult.Ready -> consumed.meta to consumed.file
+                    val consumed = sessionRepo.consumeAndMoveCompletedBlob(
+                        blobId = blobId,
+                        accountId = caller.accountId,
+                        deviceId = target.id,
+                        moduleId = moduleId,
+                    ) { meta ->
+                        val prefix = meta.storageKey.take(4)
+                        modulePath.resolve("blobs").resolve(prefix).resolve(meta.storageKey).resolve("payload.blob")
+                    }
+                    val sessionMeta = when (consumed) {
+                        is UploadSessionRepo.ConsumeResult.Ready -> consumed.meta
                         UploadSessionRepo.ConsumeResult.SessionNotFound ->
                             return@withLock CommitResult.BadRequest("Referenced blobId not found: $blobId") to emptyList<Path>()
                         UploadSessionRepo.ConsumeResult.PayloadMissing ->
@@ -240,10 +249,6 @@ class ModuleLifecycleService @Inject constructor(
                             hashHex = sessionMeta.hashHex,
                         )
                     )
-                    val prefix = sessionMeta.storageKey.take(4)
-                    val liveBlobDir = modulePath.resolve("blobs").resolve(prefix).resolve(sessionMeta.storageKey)
-                    liveBlobDir.createDirectories()
-                    sessionBlobFile.toPath().moveTo(liveBlobDir.resolve("payload.blob"), overwrite = true)
                 }
 
                 // Write payload.blob first, then module.json as commit point

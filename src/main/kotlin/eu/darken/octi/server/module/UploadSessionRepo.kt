@@ -384,18 +384,31 @@ class UploadSessionRepo @Inject constructor(
     // region Lookups (scoped)
 
     sealed interface ConsumeResult {
-        data class Ready(val meta: UploadSessionMeta, val file: java.io.File) : ConsumeResult
+        data class Ready(val meta: UploadSessionMeta) : ConsumeResult
         data object SessionNotFound : ConsumeResult
         data object PayloadMissing : ConsumeResult
     }
 
     /**
-     * Atomically resolves a COMPLETE upload session scoped to this account/device/module and
-     * verifies its staged payload file still exists. Returned [ConsumeResult.Ready] holds both the
-     * session metadata (for building the live [BlobRef]) and the on-disk file (to be moved into
-     * the module's live blob directory).
+     * Atomically resolves a COMPLETE upload session scoped to this account/device/module,
+     * verifies its staged payload file still exists, and moves the file into the module's
+     * live blob dir — all under the session's lock so the GC reaper can't delete the staged
+     * file between resolve and move.
+     *
+     * [destinationFor] computes the live destination path from the session metadata; called
+     * inside the lock with the validated meta. Parent directories are created automatically.
+     *
+     * Pre-fix design returned the file path so the caller could move it outside the lock,
+     * leaving a window where GC could terminate the session and delete the payload before
+     * commitModule got around to moving it. The atomic API closes that window.
      */
-    fun consumeCompletedBlob(blobId: String, accountId: AccountId, deviceId: DeviceId, moduleId: ModuleId): ConsumeResult {
+    suspend fun consumeAndMoveCompletedBlob(
+        blobId: String,
+        accountId: AccountId,
+        deviceId: DeviceId,
+        moduleId: ModuleId,
+        destinationFor: (UploadSessionMeta) -> Path,
+    ): ConsumeResult {
         val state = sessions.values
             .firstOrNull {
                 it.meta.blobId == blobId
@@ -403,9 +416,22 @@ class UploadSessionRepo @Inject constructor(
                     && it.meta.matchesScopeWithDevice(accountId, deviceId, moduleId)
             }
             ?: return ConsumeResult.SessionNotFound
-        val blobFile = state.sessionDir.resolve(BLOB_FILENAME)
-        if (!blobFile.exists()) return ConsumeResult.PayloadMissing
-        return ConsumeResult.Ready(meta = state.meta, file = blobFile.toFile())
+
+        return state.lock.withLock {
+            // Re-validate after acquiring the lock — GC may have terminated this session
+            // between the lookup and the lock acquisition.
+            if (sessions[state.meta.sessionId] == null) return@withLock ConsumeResult.SessionNotFound
+            if (state.meta.state != UploadSessionMeta.State.COMPLETE) return@withLock ConsumeResult.SessionNotFound
+            if (state.meta.isExpired()) return@withLock ConsumeResult.SessionNotFound
+
+            val blobFile = state.sessionDir.resolve(BLOB_FILENAME)
+            if (!blobFile.exists()) return@withLock ConsumeResult.PayloadMissing
+
+            val destPath = destinationFor(state.meta)
+            destPath.parent.createDirectories()
+            blobFile.moveTo(destPath, overwrite = true)
+            ConsumeResult.Ready(meta = state.meta)
+        }
     }
 
     fun removeCommittedSessionByBlobId(blobId: String) {
