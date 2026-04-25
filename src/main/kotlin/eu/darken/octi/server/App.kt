@@ -58,7 +58,8 @@ class App @Inject constructor(
         val maxModuleDocumentBytes: Long = 256L * 1024, // 256 KB default
         val maxActiveUploadSessionsPerDevice: Int = 8,
         val maxActiveUploadSessionsPerAccount: Int = 32,
-        val idleSessionTtlSeconds: Long = 3600, // 1 hour
+        val idleSessionTtlSeconds: Long = 3600, // 1 hour for ACTIVE state
+        val completeIdleTtlSeconds: Long = 600, // 10 min for COMPLETE state — bounds finalize-but-no-commit
         val absoluteSessionTtlSeconds: Long = 86400, // 24 hours
         val maxBlobPatchBytes: Long = 1L * 1024 * 1024, // 1 MB per chunk
         // Count caps — bound dirent/inode growth that quota alone cannot reach.

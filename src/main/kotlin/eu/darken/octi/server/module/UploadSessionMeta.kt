@@ -25,6 +25,9 @@ data class UploadSessionMeta(
     @Contextual val lastActivityAt: Instant,
     @Contextual val expiresAt: Instant,
     val idleTtlSeconds: Long = 3600,
+    // COMPLETE-state idle TTL — defaulted for backward compat with on-disk meta written
+    // before this field existed. Real value is set from App.Config at session creation.
+    val completeIdleTtlSeconds: Long = 600,
     val state: State,
 ) {
     @Serializable
@@ -34,8 +37,9 @@ data class UploadSessionMeta(
         if (state == State.ABORTED) return true
         // Absolute expiry
         if (now.isAfter(expiresAt)) return true
-        // Idle expiry
-        if (now.isAfter(lastActivityAt.plusSeconds(idleTtlSeconds))) return true
+        // Idle expiry — COMPLETE sessions get a tighter window than ACTIVE.
+        val effectiveIdleTtl = if (state == State.COMPLETE) completeIdleTtlSeconds else idleTtlSeconds
+        if (now.isAfter(lastActivityAt.plusSeconds(effectiveIdleTtl))) return true
         return false
     }
 

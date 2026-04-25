@@ -157,6 +157,7 @@ class UploadSessionRepo @Inject constructor(
             lastActivityAt = now,
             expiresAt = now.plusSeconds(config.absoluteSessionTtlSeconds),
             idleTtlSeconds = config.idleSessionTtlSeconds,
+            completeIdleTtlSeconds = config.completeIdleTtlSeconds,
             state = UploadSessionMeta.State.ACTIVE,
         )
 
