@@ -11,14 +11,14 @@ import kotlinx.coroutines.withContext
 
 private val TAG = logTag("HTTP")
 
-fun Application.installCallLogging() {
+fun Application.installCallLogging(trustedProxyIps: Set<String> = IpHelper.DEFAULT_TRUSTED_PROXY_IPS) {
     intercept(Plugins) {
         val rid = RequestId.generate()
         withContext(RequestId.contextElement(rid)) {
             val method = call.request.httpMethod.value
             val path = call.request.path()
             val userAgent = call.request.userAgent() ?: "Unknown"
-            val ip = call.request.clientIp()
+            val ip = call.request.clientIp(trustedProxyIps)
             val isWebSocket = call.request.headers["Upgrade"]?.equals("websocket", ignoreCase = true) == true
             val start = System.currentTimeMillis()
 

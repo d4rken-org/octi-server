@@ -3,6 +3,9 @@ package eu.darken.octi.server.module
 import eu.darken.octi.TestRunner
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import java.util.*
@@ -87,7 +90,7 @@ class UploadSessionLimitsTest : TestRunner() {
 
             // Abort the first session — slot is reusable on the next attempt.
             runBlocking {
-                component.sessionRepo().abortSession(firstSession.sessionId, accountId, moduleId)
+                component.sessionRepo().abortSession(firstSession.sessionId, accountId, deviceId, moduleId)
             }
             component.sessionRepo().createSession(
                 accountId = accountId, deviceId = deviceId, moduleId = moduleId,
@@ -118,6 +121,7 @@ class UploadSessionLimitsTest : TestRunner() {
                     component.sessionRepo().finalizeSession(
                         sessionId = session.sessionId,
                         accountId = accountId,
+                        deviceId = deviceId,
                         moduleId = moduleId,
                         hashAlgorithm = "sha256",
                         // SHA-256 of empty input.
@@ -171,6 +175,45 @@ class UploadSessionLimitsTest : TestRunner() {
                 )
             }
             ex.limit shouldBe 2
+        }
+    }
+
+    @Test
+    fun `per-account cap is concurrency safe across devices`() {
+        val accountId = UUID.randomUUID()
+        val deviceA = UUID.randomUUID()
+        val deviceB = UUID.randomUUID()
+        val moduleId = "eu.darken.octi.limits.concurrent"
+
+        runTest2(
+            appConfig = baseConfig.copy(
+                maxActiveUploadSessionsPerAccount = 2,
+                maxActiveUploadSessionsPerDevice = 8,
+            ),
+            seed = { cfg ->
+                BlobFixtures.seedAccountDevice(cfg.dataPath, accountId, deviceA)
+                BlobFixtures.writeDevice(cfg.dataPath, accountId, deviceB)
+            },
+        ) {
+            val results = coroutineScope {
+                (0 until 16).map { index ->
+                    async {
+                        runCatching {
+                            component.sessionRepo().createSession(
+                                accountId = accountId,
+                                deviceId = if (index % 2 == 0) deviceA else deviceB,
+                                moduleId = moduleId,
+                                expectedSizeBytes = 0,
+                                hashAlgorithm = null,
+                                hashHex = null,
+                            )
+                        }
+                    }
+                }.awaitAll()
+            }
+
+            results.count { it.isSuccess } shouldBe 2
+            results.count { it.exceptionOrNull() is SessionLimitExceededException } shouldBe 14
         }
     }
 

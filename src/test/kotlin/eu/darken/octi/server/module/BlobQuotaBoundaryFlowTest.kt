@@ -62,6 +62,7 @@ class BlobQuotaBoundaryFlowTest : TestRunner() {
             }.body<SessionInfo>()
 
             http.delete("/v1/module/$moduleId/blob-sessions/${first.sessionId}") {
+                url { parameters.append("device-id", creds.deviceId.toString()) }
                 addCredentials(creds)
             }.status shouldBe HttpStatusCode.OK
 

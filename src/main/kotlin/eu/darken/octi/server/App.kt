@@ -2,6 +2,7 @@ package eu.darken.octi.server
 
 import eu.darken.octi.server.common.AppScope
 import eu.darken.octi.server.common.DiskSpaceProbe
+import eu.darken.octi.server.common.IpHelper
 import eu.darken.octi.server.common.RateLimitConfig
 import eu.darken.octi.server.common.debug.logging.ConsoleLogger
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.*
@@ -40,6 +41,7 @@ class App @Inject constructor(
 
     fun shutdown() {
         server.stop()
+        appScope.cancel()
     }
 
     data class Config(
@@ -73,6 +75,7 @@ class App @Inject constructor(
         // Per-account rate budget (layered on top of per-IP rate limit).
         val accountRateLimit: Int = 256,
         val accountRateLimitWindowSeconds: Long = 60,
+        val trustedProxyIps: Set<String> = IpHelper.DEFAULT_TRUSTED_PROXY_IPS,
     )
 
     companion object {
@@ -91,25 +94,54 @@ class App @Inject constructor(
 
             return Config(
                 isDebug = args.any { it.startsWith("--debug") },
-                port = args
-                    .singleOrNull { it.startsWith("--port") }
-                    ?.substringAfter('=')?.toInt()
-                    ?: 8080,
+                port = parseIntFlag(args, "--port", min = 1, max = 65535) ?: 8080,
                 dataPath = args
-                    .single { it.startsWith("--datapath") }
+                    .single { it.startsWith("--datapath=") }
                     .let { Path(it.substringAfter('=')) }
                     .absolute(),
                 rateLimit = if (args.any { it.startsWith("--disable-rate-limits") }) {
                     null
                 } else {
-                    RateLimitConfig()
+                    RateLimitConfig(
+                        limit = parseIntFlag(args, "--rate-limit", min = 1) ?: RateLimitConfig().limit,
+                        resetTime = Duration.ofSeconds(
+                            parseLongFlag(args, "--rate-limit-window-seconds", min = 1)
+                                ?: RateLimitConfig().resetTime.toSeconds()
+                        ),
+                    )
                 },
+                payloadLimit = parseSizeFlag(args, "--payload-limit-kb", 1024L) ?: defaults.payloadLimit,
                 accountQuotaBytes = parseSizeFlag(args, "--account-quota-mb", 1024L * 1024L)
                     ?: defaults.accountQuotaBytes,
                 maxBlobBytes = parseSizeFlag(args, "--max-blob-mb", 1024L * 1024L)
                     ?: defaults.maxBlobBytes,
+                maxModuleDocumentBytes = parseSizeFlag(args, "--max-module-document-kb", 1024L)
+                    ?: defaults.maxModuleDocumentBytes,
                 minFreeDiskSpaceBytes = parseSizeFlag(args, "--min-free-disk-mb", 1024L * 1024L)
                     ?: defaults.minFreeDiskSpaceBytes,
+                maxActiveUploadSessionsPerDevice = parseIntFlag(args, "--max-upload-sessions-per-device", min = 1)
+                    ?: defaults.maxActiveUploadSessionsPerDevice,
+                maxActiveUploadSessionsPerAccount = parseIntFlag(args, "--max-upload-sessions-per-account", min = 1)
+                    ?: defaults.maxActiveUploadSessionsPerAccount,
+                idleSessionTtlSeconds = parseLongFlag(args, "--idle-session-ttl-seconds", min = 1)
+                    ?: defaults.idleSessionTtlSeconds,
+                completeIdleTtlSeconds = parseLongFlag(args, "--complete-idle-session-ttl-seconds", min = 1)
+                    ?: defaults.completeIdleTtlSeconds,
+                absoluteSessionTtlSeconds = parseLongFlag(args, "--absolute-session-ttl-seconds", min = 1)
+                    ?: defaults.absoluteSessionTtlSeconds,
+                maxBlobPatchBytes = parseSizeFlag(args, "--max-blob-patch-kb", 1024L)
+                    ?: defaults.maxBlobPatchBytes,
+                maxDevicesPerAccount = parseIntFlag(args, "--max-devices-per-account", min = 1)
+                    ?: defaults.maxDevicesPerAccount,
+                maxModulesPerDevice = parseIntFlag(args, "--max-modules-per-device", min = 1)
+                    ?: defaults.maxModulesPerDevice,
+                maxBlobRefsPerModule = parseIntFlag(args, "--max-blob-refs-per-module", min = 1)
+                    ?: defaults.maxBlobRefsPerModule,
+                accountRateLimit = parseIntFlag(args, "--account-rate-limit", min = 1)
+                    ?: defaults.accountRateLimit,
+                accountRateLimitWindowSeconds = parseLongFlag(args, "--account-rate-limit-window-seconds", min = 1)
+                    ?: defaults.accountRateLimitWindowSeconds,
+                trustedProxyIps = parseTrustedProxyIps(args) ?: defaults.trustedProxyIps,
             )
         }
 
@@ -131,6 +163,38 @@ class App @Inject constructor(
             } catch (e: ArithmeticException) {
                 throw IllegalArgumentException("$flag value $value overflows when scaled by $unitBytes")
             }
+        }
+
+        internal fun parseIntFlag(args: Array<String>, flag: String, min: Int, max: Int = Int.MAX_VALUE): Int? {
+            val value = parseLongFlag(args, flag, min.toLong(), max.toLong()) ?: return null
+            return value.toInt()
+        }
+
+        internal fun parseLongFlag(args: Array<String>, flag: String, min: Long, max: Long = Long.MAX_VALUE): Long? {
+            val matches = args.filter { it.startsWith("$flag=") }
+            if (matches.isEmpty()) return null
+            require(matches.size == 1) { "$flag specified more than once: ${matches.joinToString(" ")}" }
+            val rawValue = matches.single().substringAfter('=')
+            val value = rawValue.toLongOrNull()
+                ?: throw IllegalArgumentException("Invalid value for $flag: '$rawValue'")
+            require(value in min..max) { "$flag must be between $min and $max, got $value" }
+            return value
+        }
+
+        internal fun parseTrustedProxyIps(args: Array<String>): Set<String>? {
+            val matches = args.filter { it.startsWith("--trusted-proxy-ips=") }
+            if (matches.isEmpty()) return null
+            require(matches.size == 1) { "--trusted-proxy-ips specified more than once: ${matches.joinToString(" ")}" }
+            return matches.single()
+                .substringAfter('=')
+                .split(',')
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .map {
+                    IpHelper.parseIpOrNull(it)
+                        ?: throw IllegalArgumentException("Invalid value for --trusted-proxy-ips: '$it'")
+                }
+                .toSet()
         }
 
         fun createComponent(config: Config): AppComponent {

@@ -44,12 +44,14 @@ class ModuleLifecycleServiceTeardownTest : TestRunner() {
             setBody("""{"sizeBytes": ${bytes.size}, "hashAlgorithm": "sha256", "hashHex": "$hash"}""")
         }.body<SessionInfo>()
         http.patch("/v1/module/$moduleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             header("Upload-Offset", "0")
             contentType(ContentType.Application.OctetStream)
             setBody(bytes)
         }
         http.post("/v1/module/$moduleId/blob-sessions/${session.sessionId}/finalize") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             contentType(ContentType.Application.Json)
             setBody("{}")
@@ -111,7 +113,7 @@ class ModuleLifecycleServiceTeardownTest : TestRunner() {
         val usage = component.storageTracker().getUsage(accountId)
         usage.usedBytes shouldBe 0
         usage.reservedBytes shouldBe 0
-        component.sessionRepo().getSession(sessionId, accountId, moduleA) shouldBe null
+        component.sessionRepo().getSession(sessionId, accountId, creds.deviceId, moduleA) shouldBe null
     }
 
     @Test

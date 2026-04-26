@@ -51,13 +51,23 @@ application {
     mainClass.set("eu.darken.octi.server.App")
 }
 
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(21))
+    }
+}
+
 kotlin {
+    jvmToolchain(21)
     compilerOptions {
         freeCompilerArgs.add("-opt-in=kotlin.io.path.ExperimentalPathApi")
     }
 }
 
 tasks.register("generateBuildInfo") {
+    val outputFile = layout.buildDirectory.file("generated/buildinfo/BuildInfo.kt")
+    outputs.file(outputFile)
+
     doLast {
         val gitSHA = try {
             providers.exec {
@@ -77,24 +87,29 @@ tasks.register("generateBuildInfo") {
             "?"
         }
 
-        val outputDir = File(layout.buildDirectory.asFile.get(), "generated/buildinfo")
+        val outputDir = outputFile.get().asFile.parentFile
         outputDir.mkdirs()
-        File(outputDir, "BuildInfo.kt").apply {
-            writeText(
-                """
-                    package eu.darken.octi.server
-        
-                    object BuildInfo {
-                        const val GIT_SHA: String = "$gitSHA"
-                        const val GIT_DATE: String = "$gitDate"
-                    }
-                """.trimIndent()
-            )
+        val content = """
+            package eu.darken.octi.server
+
+            object BuildInfo {
+                const val GIT_SHA: String = "$gitSHA"
+                const val GIT_DATE: String = "$gitDate"
+            }
+        """.trimIndent()
+        outputFile.get().asFile.apply {
+            if (!exists() || readText() != content) {
+                writeText(content)
+            }
         }
     }
 }
 
 tasks.named("compileKotlin") {
+    dependsOn("generateBuildInfo")
+}
+
+tasks.matching { it.name == "kspKotlin" }.configureEach {
     dependsOn("generateBuildInfo")
 }
 

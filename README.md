@@ -26,6 +26,12 @@ The following flags are available:
 * `--datapath` (required) where the server should store its data
 * `--debug` to enable additional log output
 * `--port` to change the default port (8080)
+* `--trusted-proxy-ips` comma-separated proxy IPs whose `X-Real-IP`/`X-Forwarded-For` headers are trusted (default: loopback)
+* `--account-quota-mb`, `--max-blob-mb`, `--max-module-document-kb`, `--max-blob-patch-kb`, `--min-free-disk-mb`
+* `--max-upload-sessions-per-device`, `--max-upload-sessions-per-account`
+* `--idle-session-ttl-seconds`, `--complete-idle-session-ttl-seconds`, `--absolute-session-ttl-seconds`
+* `--max-devices-per-account`, `--max-modules-per-device`, `--max-blob-refs-per-module`
+* `--rate-limit`, `--rate-limit-window-seconds`, `--account-rate-limit`, `--account-rate-limit-window-seconds`, `--disable-rate-limits`
 
 ### Docker
 
@@ -42,5 +48,13 @@ Environment variables:
 * `OCTI_PORT` — server port (default: 8080)
 * `OCTI_DEBUG` — enable debug mode (default: false)
 * `OCTI_DATA_DIR` — override data directory path
+* `OCTI_TRUSTED_PROXY_IPS` — comma-separated trusted proxy IPs
+* `OCTI_ACCOUNT_QUOTA_MB`, `OCTI_MAX_BLOB_MB`, `OCTI_MAX_MODULE_DOCUMENT_KB`, `OCTI_MAX_BLOB_PATCH_KB`, `OCTI_MIN_FREE_DISK_MB`
+* `OCTI_MAX_UPLOAD_SESSIONS_PER_DEVICE`, `OCTI_MAX_UPLOAD_SESSIONS_PER_ACCOUNT`
+* `OCTI_IDLE_SESSION_TTL_SECONDS`, `OCTI_COMPLETE_IDLE_SESSION_TTL_SECONDS`, `OCTI_ABSOLUTE_SESSION_TTL_SECONDS`
+* `OCTI_MAX_DEVICES_PER_ACCOUNT`, `OCTI_MAX_MODULES_PER_DEVICE`, `OCTI_MAX_BLOB_REFS_PER_MODULE`
+* `OCTI_RATE_LIMIT`, `OCTI_RATE_LIMIT_WINDOW_SECONDS`, `OCTI_ACCOUNT_RATE_LIMIT`, `OCTI_ACCOUNT_RATE_LIMIT_WINDOW_SECONDS`, `OCTI_DISABLE_RATE_LIMITS`
+
+`GET /v1/metrics` exposes coarse aggregate counters only. It does not include account, device, blob, session, or IP identifiers.
 
 **Migrating from `/etc/octi-sync-server`**: The old volume path is still detected automatically. Update your mount to `/etc/octi-server` when convenient, or set `OCTI_DATA_DIR` explicitly.

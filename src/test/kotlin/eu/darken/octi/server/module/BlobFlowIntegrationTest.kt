@@ -89,6 +89,7 @@ class BlobFlowIntegrationTest : TestRunner() {
 
         if (payload.isNotEmpty()) {
             http.patch("/v1/module/$moduleId/blob-sessions/${session.sessionId}") {
+                url { parameters.append("device-id", targetDeviceId.toString()) }
                 addCredentials(creds)
                 header("Upload-Offset", "0")
                 contentType(ContentType.Application.OctetStream)
@@ -97,6 +98,7 @@ class BlobFlowIntegrationTest : TestRunner() {
         }
 
         http.post("/v1/module/$moduleId/blob-sessions/${session.sessionId}/finalize") {
+            url { parameters.append("device-id", targetDeviceId.toString()) }
             addCredentials(creds)
             contentType(ContentType.Application.Json)
             setBody("{}")

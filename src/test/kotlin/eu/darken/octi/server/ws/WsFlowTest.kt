@@ -168,12 +168,14 @@ class WsFlowTest : TestRunner() {
             setBody("""{"sizeBytes": ${blobData.size}, "hashAlgorithm": "sha256", "hashHex": "$blobHash"}""")
         }.body<SessionInfoStub>()
         http.patch("/v1/module/$moduleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", creds1.deviceId.toString()) }
             addCredentials(creds1)
             header("Upload-Offset", "0")
             contentType(ContentType.Application.OctetStream)
             setBody(blobData)
         }
         http.post("/v1/module/$moduleId/blob-sessions/${session.sessionId}/finalize") {
+            url { parameters.append("device-id", creds1.deviceId.toString()) }
             addCredentials(creds1)
             contentType(ContentType.Application.Json)
             setBody("{}")

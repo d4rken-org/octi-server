@@ -12,6 +12,7 @@ import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
+import java.net.ServerSocket
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.*
@@ -24,7 +25,7 @@ abstract class TestRunner {
 
     val baseConfig = App.Config(
         dataPath = Path("./build/tmp/testdatapath/${UUID.randomUUID()}"),
-        port = 16023,
+        port = findFreePort(),
         isDebug = true,
         rateLimit = null,
         // Disable the disk-space gate; tests that need it set this explicitly.
@@ -121,4 +122,6 @@ abstract class TestRunner {
     fun TestEnvironment.getModulesPath(credentials: Credentials): Path {
         return getDevicePath(credentials).resolve("modules")
     }
+
+    private fun findFreePort(): Int = ServerSocket(0).use { it.localPort }
 }

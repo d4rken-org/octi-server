@@ -5,12 +5,13 @@ import eu.darken.octi.server.account.Account
 import eu.darken.octi.server.account.AccountId
 import eu.darken.octi.server.account.AccountRepo
 import eu.darken.octi.server.common.AppScope
+import eu.darken.octi.server.common.launchPeriodicJob
 import eu.darken.octi.server.module.ModuleLifecycleService
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.*
 import eu.darken.octi.server.common.debug.logging.asLog
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
-import kotlinx.coroutines.*
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
@@ -34,6 +35,7 @@ class DeviceRepo @Inject constructor(
 ) {
 
     private val devices = ConcurrentHashMap<DeviceKey, Device>()
+    private val lastSeenPersistedAt = ConcurrentHashMap<DeviceKey, Instant>()
     private val mutex = Mutex()
 
     init {
@@ -67,33 +69,35 @@ class DeviceRepo @Inject constructor(
                         accountId = account.id,
                     )
                     devices[device.key] = device
+                    lastSeenPersistedAt[device.key] = device.lastSeen
                 }
             log(TAG, INFO) { "${devices.size} devices loaded into memory" }
         }
-        appScope.launch(Dispatchers.IO) {
-            delay(config.deviceGCInterval.toMillis() / 10)
-            while (currentCoroutineContext().isActive) {
-                val now = Instant.now()
-                val staleKeys = devices.entries
-                    .filter { Duration.between(it.value.lastSeen, now) >= config.deviceExpiration }
-                    .map { it.key }
+        appScope.launchPeriodicJob(
+            tag = TAG,
+            interval = config.deviceGCInterval,
+            initialDelay = Duration.ofMillis(config.deviceGCInterval.toMillis() / 10),
+            onErrorMessage = "Device cleanup failed",
+        ) {
+            val now = Instant.now()
+            val staleKeys = devices.entries
+                .filter { Duration.between(it.value.lastSeen, now) >= config.deviceExpiration }
+                .map { it.key }
 
-                for (key in staleKeys) {
-                    try {
-                        log(TAG, WARN) { "Deleting stale device $key" }
-                        // Route through lifecycle service first so module bytes are credited
-                        // back to the account quota and outstanding sessions are aborted.
-                        // Direct deleteDevice(key) bypasses both.
-                        val target = devices[key]
-                        if (target != null) {
-                            lifecycleService.get().deleteForDevice(key.accountId, target)
-                        }
-                        deleteDevice(key)
-                    } catch (e: Exception) {
-                        log(TAG, ERROR) { "Failed to delete stale device $key: ${e.message}" }
+            for (key in staleKeys) {
+                try {
+                    log(TAG, WARN) { "Deleting stale device $key" }
+                    // Route through lifecycle service first so module bytes are credited
+                    // back to the account quota and outstanding sessions are aborted.
+                    // Direct deleteDevice(key) bypasses both.
+                    val target = devices[key]
+                    if (target != null) {
+                        lifecycleService.get().deleteForDevice(key.accountId, target)
                     }
+                    deleteDevice(key)
+                } catch (e: Exception) {
+                    log(TAG, ERROR) { "Failed to delete stale device $key: ${e.message}" }
                 }
-                delay(config.deviceGCInterval.toMillis())
             }
         }
     }
@@ -145,6 +149,7 @@ class DeviceRepo @Inject constructor(
                 }
             }
             device.writeDevice()
+            lastSeenPersistedAt[device.key] = device.lastSeen
             log(TAG, VERBOSE) { "Device written: $this" }
             devices[device.key] = device
         }
@@ -173,7 +178,7 @@ class DeviceRepo @Inject constructor(
     suspend fun deleteDevice(key: DeviceKey) {
         log(TAG, VERBOSE) { "deleteDevice($key)..." }
         val toDelete = mutex.withLock {
-            devices.remove(key) ?: throw IllegalArgumentException("$key not found")
+            devices.remove(key).also { lastSeenPersistedAt.remove(key) } ?: throw IllegalArgumentException("$key not found")
         }
         toDelete.sync.withLock {
             toDelete.path.deleteRecursively()
@@ -186,7 +191,10 @@ class DeviceRepo @Inject constructor(
         val toDelete = mutex.withLock {
             devices
                 .filter { it.value.accountId == accountId }
-                .map { devices.remove(it.key)!! }
+                .map {
+                    lastSeenPersistedAt.remove(it.key)
+                    devices.remove(it.key)!!
+                }
         }
         log(TAG) { "deleteDevices($accountId): Deleting ${toDelete.size} devices" }
         toDelete.forEach { device ->
@@ -201,7 +209,15 @@ class DeviceRepo @Inject constructor(
         val device = devices[key] ?: return
         device.sync.withLock {
             val newDevice = device.copy(data = action(device.data))
-            newDevice.writeDevice()
+            val oldWithoutLastSeen = device.data.copy(lastSeen = newDevice.lastSeen)
+            val metadataChanged = oldWithoutLastSeen != newDevice.data
+            val lastPersisted = lastSeenPersistedAt[key] ?: device.lastSeen
+            val shouldPersist = metadataChanged ||
+                Duration.between(lastPersisted, newDevice.lastSeen) >= LAST_SEEN_DEBOUNCE
+            if (shouldPersist) {
+                newDevice.writeDevice()
+                lastSeenPersistedAt[key] = newDevice.lastSeen
+            }
             devices[key] = newDevice
         }
     }
@@ -209,6 +225,7 @@ class DeviceRepo @Inject constructor(
     companion object {
         const val DEVICES_DIR = "devices"
         private const val DEVICE_FILENAME = "device.json"
+        private val LAST_SEEN_DEBOUNCE: Duration = Duration.ofSeconds(30)
         private val TAG = logTag("Device", "Repo")
     }
 }

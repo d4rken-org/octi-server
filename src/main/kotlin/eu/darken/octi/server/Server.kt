@@ -13,6 +13,7 @@ import eu.darken.octi.server.common.AccountRateLimiter
 import eu.darken.octi.server.common.AccountRateLimiterKey
 import eu.darken.octi.server.common.IpDeviceTracker
 import eu.darken.octi.server.common.IpDeviceTrackerKey
+import eu.darken.octi.server.common.TrustedProxyIpsKey
 import eu.darken.octi.server.common.installCallLogging
 import eu.darken.octi.server.common.installRateLimit
 import io.ktor.server.plugins.bodylimit.*
@@ -61,7 +62,7 @@ class Server @Inject constructor(
     @Suppress("ExtractKtorModule")
     private val server by lazy {
         embeddedServer(Netty, config.port) {
-            installCallLogging()
+            installCallLogging(config.trustedProxyIps)
             install(AutoHeadResponse)
             install(PartialContent)
             // ConditionalHeaders is NOT installed globally — the module commit path
@@ -106,9 +107,10 @@ class Server @Inject constructor(
 
             attributes.put(IpDeviceTrackerKey, ipDeviceTracker)
             attributes.put(AccountRateLimiterKey, accountRateLimiter)
+            attributes.put(TrustedProxyIpsKey, config.trustedProxyIps)
 
             config.rateLimit
-                ?.let { installRateLimit(it, ipDeviceTracker) }
+                ?.let { installRateLimit(it, ipDeviceTracker, config.trustedProxyIps) }
                 ?: log(TAG, WARN) { "rateLimit is not configured" }
 
             routing {

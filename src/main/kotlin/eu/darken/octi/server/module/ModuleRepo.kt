@@ -8,9 +8,9 @@ import eu.darken.octi.server.common.debug.logging.asLog
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
 import eu.darken.octi.server.common.debug.logging.shortId
+import eu.darken.octi.server.common.launchPeriodicJob
 import eu.darken.octi.server.device.Device
 import eu.darken.octi.server.device.DeviceRepo
-import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import java.io.IOException
@@ -47,54 +47,55 @@ class ModuleRepo @Inject constructor(
     private val accessShadow = ConcurrentHashMap<Path, AccessState>()
 
     init {
-        appScope.launch(Dispatchers.IO) {
-            delay(config.moduleGCInterval.toMillis() / 10)
-            while (currentCoroutineContext().isActive) {
-                deviceRepo.allDevices().forEach { device: Device ->
-                    device.sync.withLock {
-                        try {
-                            if (!device.modulesPath.exists()) return@withLock
+        appScope.launchPeriodicJob(
+            tag = TAG,
+            interval = config.moduleGCInterval,
+            initialDelay = Duration.ofMillis(config.moduleGCInterval.toMillis() / 10),
+            onErrorMessage = "Module cleanup failed",
+        ) {
+            deviceRepo.allDevices().forEach { device: Device ->
+                device.sync.withLock {
+                    try {
+                        if (!device.modulesPath.exists()) return@withLock
 
-                            flushPendingAccessWrites(device.modulesPath)
+                        flushPendingAccessWrites(device.modulesPath)
 
-                            val now = Instant.now()
-                            val staleModules = device.modulesPath.listDirectoryEntries().filter { path ->
-                                val metaFile = path.resolve(META_FILENAME)
-                                val accessFile = path.resolve(ACCESS_FILENAME)
-                                // Session-only directory (no module.json, no access.json) — skip, session GC handles it
-                                if (!metaFile.exists() && !accessFile.exists()) {
-                                    return@filter false
-                                }
-
-                                // Skip modules with active non-expired upload sessions
-                                val moduleId = resolveModuleIdFromPath(path)
-                                if (moduleId != null && sessionRepo.get().hasActiveSessionsForModule(device.accountId, device.id, moduleId)) {
-                                    return@filter false
-                                }
-
-                                val lastAccessed = readEffectiveAccessTime(path, metaFile, accessFile)
-                                    ?: return@filter false
-                                Duration.between(lastAccessed, now) > config.moduleExpiration
+                        val now = Instant.now()
+                        val staleModules = device.modulesPath.listDirectoryEntries().filter { path ->
+                            val metaFile = path.resolve(META_FILENAME)
+                            val accessFile = path.resolve(ACCESS_FILENAME)
+                            // Session-only directory (no module.json, no access.json) — skip, session GC handles it
+                            if (!metaFile.exists() && !accessFile.exists()) {
+                                return@filter false
                             }
-                            if (staleModules.isNotEmpty()) {
-                                log(TAG) { "Deleting ${staleModules.size} stale modules for ${device.id}" }
-                                var totalReclaimed = 0L
-                                staleModules.forEach {
-                                    val bytes = accountForModule(it).bytes
-                                    accessShadow.remove(it)
-                                    it.deleteRecursively()
-                                    totalReclaimed += bytes
-                                }
-                                if (totalReclaimed > 0) {
-                                    storageTracker.adjustUsed(device.accountId, -totalReclaimed)
-                                }
+
+                            // Skip modules with active non-expired upload sessions
+                            val moduleId = resolveModuleIdFromPath(path)
+                            if (moduleId != null && sessionRepo.get().hasActiveSessionsForModule(device.accountId, device.id, moduleId)) {
+                                return@filter false
                             }
-                        } catch (e: IOException) {
-                            log(TAG, ERROR) { "Module expiration check failed for $device\n${e.asLog()}" }
+
+                            val lastAccessed = readEffectiveAccessTime(path, metaFile, accessFile)
+                                ?: return@filter false
+                            Duration.between(lastAccessed, now) > config.moduleExpiration
                         }
+                        if (staleModules.isNotEmpty()) {
+                            log(TAG) { "Deleting ${staleModules.size} stale modules for ${device.id}" }
+                            var totalReclaimed = 0L
+                            staleModules.forEach {
+                                val bytes = accountForModule(it).bytes
+                                accessShadow.remove(it)
+                                it.deleteRecursively()
+                                totalReclaimed += bytes
+                            }
+                            if (totalReclaimed > 0) {
+                                storageTracker.adjustUsed(device.accountId, -totalReclaimed)
+                            }
+                        }
+                    } catch (e: IOException) {
+                        log(TAG, ERROR) { "Module expiration check failed for $device\n${e.asLog()}" }
                     }
                 }
-                delay(config.moduleGCInterval.toMillis())
             }
         }
     }

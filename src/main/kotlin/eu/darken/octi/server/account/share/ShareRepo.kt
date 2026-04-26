@@ -9,7 +9,8 @@ import eu.darken.octi.server.common.debug.logging.Logging.Priority.*
 import eu.darken.octi.server.common.debug.logging.asLog
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
-import kotlinx.coroutines.*
+import eu.darken.octi.server.common.launchPeriodicJob
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
@@ -70,31 +71,32 @@ class ShareRepo @Inject constructor(
             log(TAG, INFO) { "${shares.size} shares loaded into memory" }
         }
 
-        appScope.launch(Dispatchers.IO) {
-            val expirationTime = config.shareExpiration
-
-            while (currentCoroutineContext().isActive) {
-                val now = Instant.now()
-                val expiredShares = shares.filterValues { share ->
-                    Duration.between(share.createdAt, now) > expirationTime
-                }
-                if (expiredShares.isNotEmpty()) {
-                    log(TAG, INFO) { "Deleting ${expiredShares.size} expired shares" }
-                    removeShares(expiredShares.map { it.value.id })
-                }
-                delay(expirationTime.toMillis() / 2)
+        appScope.launchPeriodicJob(
+            tag = TAG,
+            interval = Duration.ofMillis((config.shareExpiration.toMillis() / 2).coerceAtLeast(1L)),
+            initialDelay = Duration.ZERO,
+            onErrorMessage = "Share expiration failed",
+        ) {
+            val now = Instant.now()
+            val expiredShares = shares.filterValues { share ->
+                Duration.between(share.createdAt, now) > config.shareExpiration
+            }
+            if (expiredShares.isNotEmpty()) {
+                log(TAG, INFO) { "Deleting ${expiredShares.size} expired shares" }
+                removeShares(expiredShares.map { it.value.id })
             }
         }
 
-        appScope.launch(Dispatchers.IO) {
-            delay(config.shareGCInterval.toMillis() / 10)
-            while (currentCoroutineContext().isActive) {
-                val staleShares = shares.values.filter { !it.path.exists() }
-                if (staleShares.isNotEmpty()) {
-                    log(TAG, INFO) { "Removing ${staleShares.size} stale shares" }
-                    removeShares(staleShares.map { it.id })
-                }
-                delay(config.shareGCInterval.toMillis())
+        appScope.launchPeriodicJob(
+            tag = TAG,
+            interval = config.shareGCInterval,
+            initialDelay = Duration.ofMillis(config.shareGCInterval.toMillis() / 10),
+            onErrorMessage = "Share cleanup failed",
+        ) {
+            val staleShares = shares.values.filter { !it.path.exists() }
+            if (staleShares.isNotEmpty()) {
+                log(TAG, INFO) { "Removing ${staleShares.size} stale shares" }
+                removeShares(staleShares.map { it.id })
             }
         }
     }
@@ -122,17 +124,18 @@ class ShareRepo @Inject constructor(
         share.also { log(TAG) { "createShare(${account.id}): Share created created: $it" } }
     }
 
-    suspend fun getShare(code: ShareCode): Share? {
+    suspend fun getShare(code: ShareCode): Share? = mutex.withLock {
         log(TAG, VERBOSE) { "getShare($code)" }
-        return shares.values.find { it.code == code }
+        shares.values.find { it.code == code }
     }
 
-    suspend fun consumeShare(code: ShareCode): Boolean {
+    suspend fun consumeShare(code: ShareCode): Share? = mutex.withLock {
         log(TAG, VERBOSE) { "consumeShare($code)" }
-        val share = getShare(code) ?: return false
-        removeShares(listOf(share.id))
+        val share = shares.values.find { it.code == code } ?: return@withLock null
+        shares.remove(share.id)
+        share.path.deleteIfExists()
         log(TAG) { "Share was consumed: $share" }
-        return true
+        share
     }
 
     suspend fun removeShares(ids: Collection<ShareId>) = mutex.withLock {

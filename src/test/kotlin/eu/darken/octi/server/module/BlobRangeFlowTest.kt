@@ -61,6 +61,7 @@ class BlobRangeFlowTest : TestRunner() {
 
         if (payload.isNotEmpty()) {
             http.patch("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+                url { parameters.append("device-id", creds.deviceId.toString()) }
                 addCredentials(creds)
                 header("Upload-Offset", "0")
                 contentType(ContentType.Application.OctetStream)
@@ -68,6 +69,7 @@ class BlobRangeFlowTest : TestRunner() {
             }
         }
         http.post("/v1/module/$testModuleId/blob-sessions/${session.sessionId}/finalize") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             contentType(ContentType.Application.Json)
             setBody("{}")

@@ -2,6 +2,7 @@ package eu.darken.octi.server.common
 
 import eu.darken.octi.TestRunner
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.shouldNotBe
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
@@ -28,6 +29,7 @@ class RateLimiterTest : TestRunner() {
 
         http.get("/v1/status").apply {
             status shouldBe HttpStatusCode.TooManyRequests
+            headers[HttpHeaders.RetryAfter] shouldNotBe null
             bodyAsText() shouldBe "Rate limit exceeded. Try again later."
         }
     }

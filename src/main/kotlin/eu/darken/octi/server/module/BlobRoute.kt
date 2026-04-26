@@ -4,16 +4,10 @@ import eu.darken.octi.server.App
 import eu.darken.octi.server.account.AccountStorageTracker
 import eu.darken.octi.server.common.DiskSpaceProbe
 import eu.darken.octi.server.common.OctiResponseHeaders
-import eu.darken.octi.server.common.debug.logging.Logging.Priority.*
-import eu.darken.octi.server.common.debug.logging.asLog
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
 import eu.darken.octi.server.common.debug.logging.shortId
 import eu.darken.octi.server.common.parseStrongEtag
-import eu.darken.octi.server.common.verifyCaller
-import eu.darken.octi.server.device.Device
-import eu.darken.octi.server.device.DeviceId
-import eu.darken.octi.server.device.DeviceKey
 import eu.darken.octi.server.device.DeviceRepo
 import eu.darken.octi.server.ws.SyncNotifier
 import io.ktor.http.*
@@ -24,7 +18,6 @@ import io.ktor.server.routing.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
-import java.util.*
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -102,70 +95,33 @@ class BlobRoute @Inject constructor(
 
     fun setup(rootRoute: Routing) {
         rootRoute.route("/v1/module/{moduleId}") {
-            get("/blobs") { catchError { listBlobs() } }
-            get("/blobs/{blobId}") { catchError { downloadBlob() } }
-            delete("/blobs/{blobId}") { catchError { deleteBlob() } }
+            get("/blobs") { listBlobs() }
+            get("/blobs/{blobId}") { downloadBlob() }
+            delete("/blobs/{blobId}") { deleteBlob() }
 
-            post("/blob-sessions") { catchError { createSession() } }
-            get("/blob-sessions/{sessionId}") { catchError { sessionStatus() } }
+            post("/blob-sessions") { createSession() }
+            get("/blob-sessions/{sessionId}") { sessionStatus() }
 
             // PATCH gets a larger body limit for blob chunks
             route("/blob-sessions/{sessionId}") {
                 install(RequestBodyLimit) { bodyLimit { config.maxBlobPatchBytes } }
-                patch { catchError { appendToSession() } }
+                patch { appendToSession() }
             }
 
-            post("/blob-sessions/{sessionId}/finalize") { catchError { finalizeSession() } }
-            delete("/blob-sessions/{sessionId}") { catchError { abortSession() } }
+            post("/blob-sessions/{sessionId}/finalize") { finalizeSession() }
+            delete("/blob-sessions/{sessionId}") { abortSession() }
         }
     }
 
     // region Helpers
-    private suspend fun RoutingContext.catchError(action: suspend RoutingContext.() -> Unit) {
-        try {
-            action()
-        } catch (e: Exception) {
-            log(TAG, ERROR) { "$call ${e.asLog()}" }
-            if (!call.response.isCommitted) {
-                call.respond(HttpStatusCode.InternalServerError, "Request failed")
-            }
-        }
-    }
-
-    private fun RoutingContext.requireModuleId(): ModuleId? {
-        val moduleId = call.parameters["moduleId"]
-        if (moduleId == null || moduleId.length > 1024 || !MODULE_ID_REGEX.matches(moduleId)) return null
-        return moduleId
-    }
-
-    private suspend fun RoutingContext.verifyTarget(callerDevice: Device): Device? {
-        val targetDeviceId: DeviceId? = try {
-            call.request.queryParameters["device-id"]?.let { UUID.fromString(it) }
-        } catch (e: IllegalArgumentException) {
-            call.respond(HttpStatusCode.BadRequest, "Invalid device ID format")
-            return null
-        }
-        if (targetDeviceId == null) {
-            call.respond(HttpStatusCode.BadRequest, "Target device id not supplied")
-            return null
-        }
-        return deviceRepo.getDevice(DeviceKey(callerDevice.accountId, targetDeviceId))
-            ?: run {
-                call.respond(HttpStatusCode.NotFound, "Target device not found")
-                null
-            }
-    }
-
     // endregion
 
     // region Blob List & Download
     private suspend fun RoutingContext.listBlobs() {
-        val moduleId = requireModuleId() ?: run {
-            call.respond(HttpStatusCode.BadRequest, "Invalid moduleId")
-            return
-        }
-        val caller = verifyCaller(TAG, deviceRepo) ?: return
-        val target = verifyTarget(caller) ?: return
+        val ctx = resolveModuleContext(TAG, deviceRepo) ?: return
+        val moduleId = ctx.moduleId
+        val caller = ctx.caller
+        val target = ctx.target
 
         val meta = moduleRepo.loadMetaSafe(target, moduleId)
         if (meta == null) {
@@ -185,16 +141,13 @@ class BlobRoute @Inject constructor(
     }
 
     private suspend fun RoutingContext.downloadBlob() {
-        val moduleId = requireModuleId() ?: run {
-            call.respond(HttpStatusCode.BadRequest, "Invalid moduleId")
-            return
-        }
+        val ctx = resolveModuleContext(TAG, deviceRepo) ?: return
+        val moduleId = ctx.moduleId
+        val target = ctx.target
         val blobId = call.parameters["blobId"] ?: run {
             call.respond(HttpStatusCode.BadRequest, "Missing blobId")
             return
         }
-        val caller = verifyCaller(TAG, deviceRepo) ?: return
-        val target = verifyTarget(caller) ?: return
 
         val handle = moduleRepo.openBlobHandle(target, moduleId, blobId)
         if (handle == null) {
@@ -344,10 +297,10 @@ class BlobRoute @Inject constructor(
     }
 
     private suspend fun RoutingContext.deleteBlob() {
-        val moduleId = requireModuleId() ?: run {
-            call.respond(HttpStatusCode.BadRequest, "Invalid moduleId")
-            return
-        }
+        val ctx = resolveModuleContext(TAG, deviceRepo) ?: return
+        val moduleId = ctx.moduleId
+        val caller = ctx.caller
+        val target = ctx.target
         val blobId = call.parameters["blobId"] ?: run {
             call.respond(HttpStatusCode.BadRequest, "Missing blobId")
             return
@@ -365,9 +318,6 @@ class BlobRoute @Inject constructor(
             call.respond(HttpStatusCode.BadRequest, "Wildcard If-Match not supported on blob delete")
             return
         }
-
-        val caller = verifyCaller(TAG, deviceRepo) ?: return
-        val target = verifyTarget(caller) ?: return
 
         when (val result = lifecycleService.deleteBlob(caller, target, moduleId, blobId, ifMatch)) {
             is ModuleLifecycleService.DeleteBlobResult.ModuleNotFound ->
@@ -397,12 +347,10 @@ class BlobRoute @Inject constructor(
 
     // region Upload Sessions
     private suspend fun RoutingContext.createSession() {
-        val moduleId = requireModuleId() ?: run {
-            call.respond(HttpStatusCode.BadRequest, "Invalid moduleId")
-            return
-        }
-        val caller = verifyCaller(TAG, deviceRepo) ?: return
-        val target = verifyTarget(caller) ?: return
+        val ctx = resolveModuleContext(TAG, deviceRepo) ?: return
+        val moduleId = ctx.moduleId
+        val caller = ctx.caller
+        val target = ctx.target
 
         val request = call.receive<CreateSessionRequest>()
 
@@ -495,17 +443,16 @@ class BlobRoute @Inject constructor(
     }
 
     private suspend fun RoutingContext.sessionStatus() {
-        val moduleId = requireModuleId() ?: run {
-            call.respond(HttpStatusCode.BadRequest, "Invalid moduleId")
-            return
-        }
+        val ctx = resolveModuleContext(TAG, deviceRepo) ?: return
+        val moduleId = ctx.moduleId
+        val caller = ctx.caller
+        val target = ctx.target
         val sessionId = call.parameters["sessionId"] ?: run {
             call.respond(HttpStatusCode.BadRequest, "Missing sessionId")
             return
         }
-        val caller = verifyCaller(TAG, deviceRepo) ?: return
 
-        val session = sessionRepo.getSession(sessionId, caller.accountId, moduleId)
+        val session = sessionRepo.getSession(sessionId, caller.accountId, target.id, moduleId)
         if (session == null) {
             call.respond(HttpStatusCode.NotFound, "Session not found")
             return
@@ -520,25 +467,33 @@ class BlobRoute @Inject constructor(
     }
 
     private suspend fun RoutingContext.appendToSession() {
-        val moduleId = requireModuleId() ?: run {
-            call.respond(HttpStatusCode.BadRequest, "Invalid moduleId")
-            return
-        }
+        val ctx = resolveModuleContext(TAG, deviceRepo) ?: return
+        val moduleId = ctx.moduleId
+        val caller = ctx.caller
+        val target = ctx.target
         val sessionId = call.parameters["sessionId"] ?: run {
             call.respond(HttpStatusCode.BadRequest, "Missing sessionId")
             return
         }
-        val caller = verifyCaller(TAG, deviceRepo) ?: return
 
         val requestOffset = call.request.headers["Upload-Offset"]?.toLongOrNull()
         if (requestOffset == null) {
             call.respond(HttpStatusCode.BadRequest, "Missing or invalid Upload-Offset header")
             return
         }
+        val contentLength = call.request.headers[HttpHeaders.ContentLength]?.toLongOrNull()
+        if (contentLength == null || contentLength < 0) {
+            call.respond(HttpStatusCode.LengthRequired, "Content-Length header is required")
+            return
+        }
+        if (contentLength > config.maxBlobPatchBytes) {
+            call.respond(HttpStatusCode.PayloadTooLarge, "Chunk exceeds maximum patch size")
+            return
+        }
 
         // Existence/state/offset checks before the disk gate so a stale or wrong-offset
         // request routes to its proper 4xx instead of getting masked by 507 when disk is low.
-        val session = sessionRepo.getSession(sessionId, caller.accountId, moduleId)
+        val session = sessionRepo.getSession(sessionId, caller.accountId, target.id, moduleId)
         if (session == null) {
             call.respond(HttpStatusCode.NotFound, "Session not found")
             return
@@ -554,6 +509,10 @@ class BlobRoute @Inject constructor(
         // Size against the server-side upper bound; client Content-Length isn't trusted
         // because it could only shrink the gate, weakening disk protection.
         val remainingBytes = (session.expectedSizeBytes - session.offsetBytes).coerceAtLeast(0L)
+        if (contentLength > remainingBytes) {
+            call.respond(HttpStatusCode.Conflict, "Upload would exceed declared size")
+            return
+        }
         val incomingUpperBound = minOf(config.maxBlobPatchBytes, remainingBytes)
         if (!diskSpaceProbe.hasHeadroom(incomingUpperBound)) {
             call.response.header(OctiResponseHeaders.REASON, OctiResponseHeaders.SERVER_DISK_LOW)
@@ -565,6 +524,7 @@ class BlobRoute @Inject constructor(
         val result = sessionRepo.appendToSession(
             sessionId = sessionId,
             accountId = caller.accountId,
+            deviceId = target.id,
             moduleId = moduleId,
             requestOffset = requestOffset,
             channel = channel,
@@ -595,15 +555,14 @@ class BlobRoute @Inject constructor(
     }
 
     private suspend fun RoutingContext.finalizeSession() {
-        val moduleId = requireModuleId() ?: run {
-            call.respond(HttpStatusCode.BadRequest, "Invalid moduleId")
-            return
-        }
+        val ctx = resolveModuleContext(TAG, deviceRepo) ?: return
+        val moduleId = ctx.moduleId
+        val caller = ctx.caller
+        val target = ctx.target
         val sessionId = call.parameters["sessionId"] ?: run {
             call.respond(HttpStatusCode.BadRequest, "Missing sessionId")
             return
         }
-        val caller = verifyCaller(TAG, deviceRepo) ?: return
 
         val request = call.receive<FinalizeRequest>()
 
@@ -619,6 +578,7 @@ class BlobRoute @Inject constructor(
         val result = sessionRepo.finalizeSession(
             sessionId = sessionId,
             accountId = caller.accountId,
+            deviceId = target.id,
             moduleId = moduleId,
             hashAlgorithm = request.hashAlgorithm,
             hashHex = request.hashHex,
@@ -650,17 +610,16 @@ class BlobRoute @Inject constructor(
     }
 
     private suspend fun RoutingContext.abortSession() {
-        val moduleId = requireModuleId() ?: run {
-            call.respond(HttpStatusCode.BadRequest, "Invalid moduleId")
-            return
-        }
+        val ctx = resolveModuleContext(TAG, deviceRepo) ?: return
+        val moduleId = ctx.moduleId
+        val caller = ctx.caller
+        val target = ctx.target
         val sessionId = call.parameters["sessionId"] ?: run {
             call.respond(HttpStatusCode.BadRequest, "Missing sessionId")
             return
         }
-        val caller = verifyCaller(TAG, deviceRepo) ?: return
 
-        val session = sessionRepo.abortSession(sessionId, caller.accountId, moduleId)
+        val session = sessionRepo.abortSession(sessionId, caller.accountId, target.id, moduleId)
         if (session == null) {
             call.respond(HttpStatusCode.NotFound, "Session not found")
             return
@@ -672,7 +631,6 @@ class BlobRoute @Inject constructor(
     // endregion
 
     companion object {
-        private val MODULE_ID_REGEX = "^[a-z]+(\\.[a-z0-9_]+)*$".toRegex()
         private val SHA256_HEX_REGEX = "^[0-9a-f]{64}$".toRegex()
         private val TAG = logTag("Blob", "Route")
     }

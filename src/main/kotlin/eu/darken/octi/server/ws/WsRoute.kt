@@ -1,5 +1,6 @@
 package eu.darken.octi.server.ws
 
+import eu.darken.octi.server.App
 import eu.darken.octi.server.common.AccountRateLimiter
 import eu.darken.octi.server.common.AuthResult
 import eu.darken.octi.server.common.DeviceMetadataPatch
@@ -26,6 +27,7 @@ import javax.inject.Singleton
 
 @Singleton
 class WsRoute @Inject constructor(
+    private val config: App.Config,
     private val deviceRepo: DeviceRepo,
     private val connectionRegistry: ConnectionRegistry,
     private val ipDeviceTracker: IpDeviceTracker,
@@ -49,17 +51,19 @@ class WsRoute @Inject constructor(
             }
 
             // Per-account rate-limit applies to WS connection establishment too.
-            if (!accountRateLimiter.tryAcquire(auth.device.accountId)) {
+            if (accountRateLimiter.acquire(auth.device.accountId) is AccountRateLimiter.Decision.Rejected) {
                 log(TAG, WARN) { "WS rate-limited: account=${auth.device.accountId}" }
                 close(CloseReason(CloseReason.Codes.TRY_AGAIN_LATER, "Account rate limit exceeded"))
                 return@webSocket
             }
 
+            val clientIp = call.request.clientIp(config.trustedProxyIps)
+
             // Record metadata only after the rate-limit gate accepts.
             touchAuthenticatedDevice(
                 device = auth.device,
                 deviceRepo = deviceRepo,
-                clientIp = call.request.clientIp(),
+                clientIp = clientIp,
                 ipTracker = ipDeviceTracker,
                 metadata = DeviceMetadataPatch(
                     version = call.request.headers["Octi-Device-Version"],
@@ -69,7 +73,6 @@ class WsRoute @Inject constructor(
             )
 
             val connectedAt = Instant.now()
-            val clientIp = call.request.clientIp()
             val registerResult = connectionRegistry.register(auth.deviceId, auth.device.accountId, clientIp)
             val deviceSession = when (registerResult) {
                 is ConnectionRegistry.RegisterResult.Accepted -> registerResult.session

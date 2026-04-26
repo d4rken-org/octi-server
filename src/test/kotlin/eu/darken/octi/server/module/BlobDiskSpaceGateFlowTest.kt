@@ -59,6 +59,7 @@ class BlobDiskSpaceGateFlowTest : TestRunner() {
             )
 
             val response = http.patch("/v1/module/$moduleId/blob-sessions/${seeded.sessionId}") {
+                url { parameters.append("device-id", creds.deviceId.toString()) }
                 addCredentials(creds)
                 header("Upload-Offset", "0")
                 contentType(ContentType.Application.OctetStream)
@@ -77,6 +78,7 @@ class BlobDiskSpaceGateFlowTest : TestRunner() {
             // Existence check runs before the disk gate so a typo'd sessionId routes to
             // the correct 404 rather than getting masked by the safety floor.
             http.patch("/v1/module/$moduleId/blob-sessions/${UUID.randomUUID()}") {
+                url { parameters.append("device-id", creds.deviceId.toString()) }
                 addCredentials(creds)
                 header("Upload-Offset", "0")
                 contentType(ContentType.Application.OctetStream)
@@ -102,6 +104,7 @@ class BlobDiskSpaceGateFlowTest : TestRunner() {
             // Offset of 50 doesn't match the actual offset (0). Offset check must fire
             // before the disk gate, so client sees 409 with the real expected offset.
             http.patch("/v1/module/$moduleId/blob-sessions/${seeded.sessionId}") {
+                url { parameters.append("device-id", creds.deviceId.toString()) }
                 addCredentials(creds)
                 header("Upload-Offset", "50")
                 contentType(ContentType.Application.OctetStream)
@@ -179,6 +182,7 @@ class BlobDiskSpaceGateFlowTest : TestRunner() {
             }.body<SessionInfo>()
 
             http.patch("/v1/module/$moduleId/blob-sessions/${session.sessionId}") {
+                url { parameters.append("device-id", creds.deviceId.toString()) }
                 addCredentials(creds)
                 header("Upload-Offset", "0")
                 contentType(ContentType.Application.OctetStream)

@@ -6,8 +6,9 @@ import eu.darken.octi.server.common.debug.logging.Logging.Priority.*
 import eu.darken.octi.server.common.debug.logging.asLog
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
+import eu.darken.octi.server.common.launchPeriodicJob
 import eu.darken.octi.server.device.DeviceRepo
-import kotlinx.coroutines.*
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
@@ -74,22 +75,23 @@ class AccountRepo @Inject constructor(
             log(TAG, INFO) { "${accounts.size} accounts loaded into memory" }
         }
 
-        appScope.launch(Dispatchers.IO) {
-            delay((config.accountGCInterval.toMillis() / 10))
-            while (currentCoroutineContext().isActive) {
-                val now = Instant.now()
-                val orphaned = accounts.filterValues {
-                    // We don't lock the mutex, skip accounts that are currently in creation
-                    if (Duration.between(it.createdAt, now) < config.accountGCInterval) {
-                        return@filterValues false
-                    }
-                    it.path.resolve(DeviceRepo.DEVICES_DIR).listDirectoryEntries().isEmpty()
+        appScope.launchPeriodicJob(
+            tag = TAG,
+            interval = config.accountGCInterval,
+            initialDelay = Duration.ofMillis(config.accountGCInterval.toMillis() / 10),
+            onErrorMessage = "Account cleanup failed",
+        ) {
+            val now = Instant.now()
+            val orphaned = accounts.filterValues {
+                // We don't lock the mutex, skip accounts that are currently in creation
+                if (Duration.between(it.createdAt, now) < config.accountGCInterval) {
+                    return@filterValues false
                 }
-                if (orphaned.isNotEmpty()) {
-                    log(TAG, INFO) { "Deleting ${orphaned.size} accounts without devices" }
-                    deleteAccounts(orphaned.map { it.value.id })
-                }
-                delay(config.accountGCInterval.toMillis())
+                it.path.resolve(DeviceRepo.DEVICES_DIR).listDirectoryEntries().isEmpty()
+            }
+            if (orphaned.isNotEmpty()) {
+                log(TAG, INFO) { "Deleting ${orphaned.size} accounts without devices" }
+                deleteAccounts(orphaned.map { it.value.id })
             }
         }
     }

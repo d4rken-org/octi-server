@@ -29,6 +29,17 @@ class AccountStorageTracker @Inject constructor(
         return usageMap.getOrDefault(accountId, AccountUsage())
     }
 
+    fun aggregateUsage(): AccountUsage {
+        return synchronized(quotaLock) {
+            usageMap.values.fold(AccountUsage()) { acc, usage ->
+                AccountUsage(
+                    usedBytes = acc.usedBytes + usage.usedBytes,
+                    reservedBytes = acc.reservedBytes + usage.reservedBytes,
+                )
+            }
+        }
+    }
+
     /**
      * Rebuilds usage accounting for an account from startup recovery scan.
      */

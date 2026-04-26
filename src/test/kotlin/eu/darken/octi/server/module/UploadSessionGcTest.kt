@@ -46,7 +46,7 @@ class UploadSessionGcTest : TestRunner() {
 
             runBlocking { component.sessionRepo().reapExpiredSessions() }
 
-            component.sessionRepo().getSession(session.sessionId, accountId, session.moduleId) shouldBe
+            component.sessionRepo().getSession(session.sessionId, accountId, deviceId, session.moduleId) shouldBe
                 session.copy()
             component.storageTracker().getUsage(accountId).reservedBytes shouldBe 500
         }
@@ -78,7 +78,7 @@ class UploadSessionGcTest : TestRunner() {
 
             runBlocking { component.sessionRepo().reapExpiredSessions() }
 
-            component.sessionRepo().getSession(session.sessionId, accountId, moduleId) shouldBe null
+            component.sessionRepo().getSession(session.sessionId, accountId, deviceId, moduleId) shouldBe null
             component.storageTracker().getUsage(accountId).reservedBytes shouldBe 0
             sessionDirPath.toFile().exists() shouldBe false
         }
@@ -109,7 +109,7 @@ class UploadSessionGcTest : TestRunner() {
 
             runBlocking { component.sessionRepo().reapExpiredSessions() }
 
-            component.sessionRepo().getSession(session.sessionId, accountId, moduleId) shouldBe null
+            component.sessionRepo().getSession(session.sessionId, accountId, deviceId, moduleId) shouldBe null
             component.storageTracker().getUsage(accountId).reservedBytes shouldBe 0
             sessionDirPath.toFile().exists() shouldBe false
         }
@@ -178,6 +178,7 @@ class UploadSessionGcTest : TestRunner() {
                 component.sessionRepo().finalizeSession(
                     sessionId = session.sessionId,
                     accountId = accountId,
+                    deviceId = deviceId,
                     moduleId = moduleId,
                     hashAlgorithm = "SHA-256",
                     hashHex = sha,
@@ -185,22 +186,23 @@ class UploadSessionGcTest : TestRunner() {
             }
             finalizeResult.shouldBeInstanceOf<UploadSessionRepo.FinalizeResult.Success>()
 
-            val completeMeta = component.sessionRepo().getSession(session.sessionId, accountId, moduleId)!!
-            completeMeta.idleTtlSeconds shouldBe UploadSessionRepo.COMPLETE_IDLE_TTL_SECONDS
+            val completeMeta = component.sessionRepo().getSession(session.sessionId, accountId, deviceId, moduleId)!!
+            completeMeta.idleTtlSeconds shouldBe config.idleSessionTtlSeconds
+            completeMeta.completeIdleTtlSeconds shouldBe config.completeIdleTtlSeconds
 
             // Fresh COMPLETE: not reaped under the shorter idle TTL.
             runBlocking { component.sessionRepo().reapExpiredSessions() }
-            component.sessionRepo().getSession(session.sessionId, accountId, moduleId) shouldNotBe null
+            component.sessionRepo().getSession(session.sessionId, accountId, deviceId, moduleId) shouldNotBe null
 
             // Quiet for longer than the shortened idle TTL, but well under the ACTIVE-state TTL.
             val agedComplete = completeMeta.copy(
-                lastActivityAt = Instant.now().minusSeconds(UploadSessionRepo.COMPLETE_IDLE_TTL_SECONDS + 60),
+                lastActivityAt = Instant.now().minusSeconds(config.completeIdleTtlSeconds + 60),
             )
             component.sessionRepo().loadSession(agedComplete, sessionDirPath)
 
             runBlocking { component.sessionRepo().reapExpiredSessions() }
 
-            component.sessionRepo().getSession(session.sessionId, accountId, moduleId) shouldBe null
+            component.sessionRepo().getSession(session.sessionId, accountId, deviceId, moduleId) shouldBe null
             component.storageTracker().getUsage(accountId).reservedBytes shouldBe 0
             sessionDirPath.toFile().exists() shouldBe false
         }

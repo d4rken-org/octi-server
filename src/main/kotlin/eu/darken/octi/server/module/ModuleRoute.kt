@@ -1,18 +1,11 @@
 package eu.darken.octi.server.module
 
 import eu.darken.octi.server.App
-import eu.darken.octi.server.common.debug.logging.Logging.Priority.ERROR
-import eu.darken.octi.server.common.debug.logging.Logging.Priority.WARN
-import eu.darken.octi.server.common.debug.logging.asLog
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
 import eu.darken.octi.server.common.debug.logging.shortId
 import eu.darken.octi.server.common.OctiResponseHeaders
 import eu.darken.octi.server.common.parseStrongEtag
-import eu.darken.octi.server.common.verifyCaller
-import eu.darken.octi.server.device.Device
-import eu.darken.octi.server.device.DeviceId
-import eu.darken.octi.server.device.DeviceKey
 import eu.darken.octi.server.device.DeviceRepo
 import eu.darken.octi.server.ws.SyncNotifier
 import io.ktor.http.*
@@ -51,71 +44,24 @@ class ModuleRoute @Inject constructor(
         val etag: String,
     )
 
-    private suspend fun RoutingContext.requireModuleId(): ModuleId? {
-        val moduleId = call.parameters["moduleId"]
-        if (moduleId == null) {
-            call.respond(HttpStatusCode.BadRequest, "Missing moduleId")
-            return null
-        }
-        if (moduleId.length > 1024) {
-            call.respond(HttpStatusCode.BadRequest, "Invalid moduleId")
-            return null
-        }
-        if (!MODULE_ID_REGEX.matches(moduleId)) {
-            call.respond(HttpStatusCode.BadRequest, "Invalid moduleId")
-            return null
-        }
-        return moduleId
-    }
-
-    private suspend fun RoutingContext.catchError(action: suspend RoutingContext.() -> Unit) {
-        try {
-            action()
-        } catch (e: Exception) {
-            log(TAG, ERROR) { "$call ${e.asLog()}" }
-            call.respond(HttpStatusCode.InternalServerError, "Request failed")
-        }
-    }
-
     fun setup(rootRoute: Routing) {
         rootRoute.route("/v1/module") {
-            get("/{moduleId}") { catchError { readModule() } }
-            post("/{moduleId}") { catchError { writeModule() } }
+            get("/{moduleId}") { readModule() }
+            post("/{moduleId}") { writeModule() }
             // PUT needs a higher body limit for base64-encoded documents
             route("/{moduleId}") {
                 install(RequestBodyLimit) { bodyLimit { config.maxModuleDocumentBytes * 2 } }
-                put { catchError { commitModule() } }
+                put { commitModule() }
             }
-            delete("/{moduleId}") { catchError { deleteModule() } }
+            delete("/{moduleId}") { deleteModule() }
         }
-    }
-
-    private suspend fun RoutingContext.verifyTarget(callerDevice: Device): Device? {
-        val targetDeviceId: DeviceId? = try {
-            call.request.queryParameters["device-id"]?.let { UUID.fromString(it) }
-        } catch (e: IllegalArgumentException) {
-            call.respond(HttpStatusCode.BadRequest, "Invalid device ID format")
-            return null
-        }
-        if (targetDeviceId == null) {
-            log(TAG, WARN) { "Caller did not supply target device: $callerDevice" }
-            call.respond(HttpStatusCode.BadRequest, "Target device id not supplied")
-            return null
-        }
-        val target = deviceRepo.getDevice(DeviceKey(callerDevice.accountId, targetDeviceId))
-        if (target == null) {
-            log(TAG, WARN) { "Target device was not found for $targetDeviceId" }
-            call.respond(HttpStatusCode.NotFound, "Target device not found")
-            return null
-        }
-
-        return target
     }
 
     private suspend fun RoutingContext.readModule() {
-        val moduleId = requireModuleId() ?: return
-        val callerDevice = verifyCaller(TAG, deviceRepo) ?: return
-        val targetDevice = verifyTarget(callerDevice) ?: return
+        val ctx = resolveModuleContext(TAG, deviceRepo) ?: return
+        val moduleId = ctx.moduleId
+        val callerDevice = ctx.caller
+        val targetDevice = ctx.target
 
         val ref = moduleRepo.readRef(callerDevice, targetDevice, moduleId)
         val stream = ref.blobStream
@@ -149,9 +95,10 @@ class ModuleRoute @Inject constructor(
     }
 
     private suspend fun RoutingContext.writeModule() {
-        val moduleId = requireModuleId() ?: return
-        val callerDevice = verifyCaller(TAG, deviceRepo) ?: return
-        val targetDevice = verifyTarget(callerDevice) ?: return
+        val ctx = resolveModuleContext(TAG, deviceRepo) ?: return
+        val moduleId = ctx.moduleId
+        val callerDevice = ctx.caller
+        val targetDevice = ctx.target
 
         val contentLength = call.request.headers["Content-Length"]?.toLongOrNull()
         if (config.payloadLimit != null && contentLength != null && contentLength > config.payloadLimit) {
@@ -197,9 +144,10 @@ class ModuleRoute @Inject constructor(
     }
 
     private suspend fun RoutingContext.deleteModule() {
-        val moduleId = requireModuleId() ?: return
-        val callerDevice = verifyCaller(TAG, deviceRepo) ?: return
-        val targetDevice = verifyTarget(callerDevice) ?: return
+        val ctx = resolveModuleContext(TAG, deviceRepo) ?: return
+        val moduleId = ctx.moduleId
+        val callerDevice = ctx.caller
+        val targetDevice = ctx.target
 
         lifecycleService.legacyDelete(callerDevice, targetDevice, moduleId)
 
@@ -217,9 +165,10 @@ class ModuleRoute @Inject constructor(
     }
 
     private suspend fun RoutingContext.commitModule() {
-        val moduleId = requireModuleId() ?: return
-        val callerDevice = verifyCaller(TAG, deviceRepo) ?: return
-        val targetDevice = verifyTarget(callerDevice) ?: return
+        val ctx = resolveModuleContext(TAG, deviceRepo) ?: return
+        val moduleId = ctx.moduleId
+        val callerDevice = ctx.caller
+        val targetDevice = ctx.target
 
         val request = call.receive<CommitRequest>()
 
@@ -306,7 +255,6 @@ class ModuleRoute @Inject constructor(
     }
 
     companion object {
-        private val MODULE_ID_REGEX = "^[a-z]+(\\.[a-z0-9_]+)*$".toRegex()
         private val TAG = logTag("Module", "Route")
     }
 }

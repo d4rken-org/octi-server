@@ -6,8 +6,12 @@ import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.string.shouldContain
 import io.ktor.client.statement.*
 import io.ktor.http.*
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.junit.jupiter.api.Test
 import java.time.Duration
+import java.util.UUID
 import kotlin.io.path.exists
 import kotlin.io.path.listDirectoryEntries
 import kotlin.io.path.readText
@@ -62,5 +66,24 @@ class ShareRepoTest : TestRunner() {
         val share1 = createShareCode(creds1)
         createDevice(shareCode = share1)
         getSharesPath(creds1).listDirectoryEntries().isEmpty() shouldBe true
+    }
+
+    @Test
+    fun `share code can only be consumed once under concurrent registration`() = runTest2 {
+        val owner = createDevice()
+        val shareCode = createShareCode(owner)
+
+        val responses = coroutineScope {
+            (1..16).map {
+                async {
+                    createDeviceRaw(deviceId = UUID.randomUUID(), shareCode = shareCode)
+                }
+            }.awaitAll()
+        }
+
+        responses.count { it.status == HttpStatusCode.OK } shouldBe 1
+        responses.count { it.status == HttpStatusCode.Forbidden } shouldBe 15
+        getDevices(owner).devices.size shouldBe 2
+        getSharesPath(owner).listDirectoryEntries().isEmpty() shouldBe true
     }
 }

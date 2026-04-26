@@ -1,4 +1,4 @@
-FROM gradle:8.13 AS builder
+FROM gradle:8.13-jdk21 AS builder
 WORKDIR /octi-server
 
 # Copy Gradle wrapper files first for better caching
@@ -23,8 +23,7 @@ COPY src/ ./src/
 # Build the application
 RUN ./gradlew clean installDist --no-daemon
 
-FROM eclipse-temurin:24-jre
-# ^ 3 Medium, 2 Low vulnerabilities (04.12.2025)
+FROM eclipse-temurin:21-jre
 WORKDIR /octi-server
 
 # Create non-root user for security (let system assign UID)

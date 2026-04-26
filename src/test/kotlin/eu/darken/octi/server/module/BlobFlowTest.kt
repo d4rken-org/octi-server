@@ -87,6 +87,7 @@ class BlobFlowTest : TestRunner() {
         }.body<SessionInfo>()
 
         http.get("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
         }.apply {
             status shouldBe HttpStatusCode.OK
@@ -95,6 +96,40 @@ class BlobFlowTest : TestRunner() {
             headers["Upload-State"] shouldBe "active"
             headers["X-Blob-ID"] shouldNotBe null
         }
+    }
+
+    @Test
+    fun `upload session operations require target device id`() = runTest2 {
+        val creds = createDevice()
+        writeModule(creds, testModuleId, data = "init")
+
+        val session = http.post("/v1/module/$testModuleId/blob-sessions") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            contentType(ContentType.Application.Json)
+            setBody("""{"sizeBytes": 1}""")
+        }.body<SessionInfo>()
+
+        http.get("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            addCredentials(creds)
+        }.status shouldBe HttpStatusCode.BadRequest
+
+        http.patch("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            addCredentials(creds)
+            header("Upload-Offset", "0")
+            contentType(ContentType.Application.OctetStream)
+            setBody(ByteArray(1))
+        }.status shouldBe HttpStatusCode.BadRequest
+
+        http.post("/v1/module/$testModuleId/blob-sessions/${session.sessionId}/finalize") {
+            addCredentials(creds)
+            contentType(ContentType.Application.Json)
+            setBody("{}")
+        }.status shouldBe HttpStatusCode.BadRequest
+
+        http.delete("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            addCredentials(creds)
+        }.status shouldBe HttpStatusCode.BadRequest
     }
 
     @Test
@@ -128,6 +163,7 @@ class BlobFlowTest : TestRunner() {
 
         // 2. Upload data via PATCH
         http.patch("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             header("Upload-Offset", "0")
             contentType(ContentType.Application.OctetStream)
@@ -139,6 +175,7 @@ class BlobFlowTest : TestRunner() {
 
         // 3. Finalize
         val finalized = http.post("/v1/module/$testModuleId/blob-sessions/${session.sessionId}/finalize") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             contentType(ContentType.Application.Json)
             setBody("{}")
@@ -302,6 +339,7 @@ class BlobFlowTest : TestRunner() {
 
         // Upload
         http.patch("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             header("Upload-Offset", "0")
             contentType(ContentType.Application.OctetStream)
@@ -310,6 +348,7 @@ class BlobFlowTest : TestRunner() {
 
         // Finalize should fail with checksum mismatch
         http.post("/v1/module/$testModuleId/blob-sessions/${session.sessionId}/finalize") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             contentType(ContentType.Application.Json)
             setBody("{}")
@@ -332,6 +371,7 @@ class BlobFlowTest : TestRunner() {
 
         // Abort
         http.delete("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
         }.apply {
             status shouldBe HttpStatusCode.OK
@@ -339,6 +379,7 @@ class BlobFlowTest : TestRunner() {
 
         // Session should no longer exist
         http.get("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
         }.apply {
             status shouldBe HttpStatusCode.NotFound
@@ -395,6 +436,7 @@ class BlobFlowTest : TestRunner() {
 
         // Finalize immediately (zero bytes to upload)
         http.post("/v1/module/$testModuleId/blob-sessions/${session.sessionId}/finalize") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             contentType(ContentType.Application.Json)
             setBody("{}")
@@ -423,6 +465,7 @@ class BlobFlowTest : TestRunner() {
 
         // First chunk at offset 0
         http.patch("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             header("Upload-Offset", "0")
             contentType(ContentType.Application.OctetStream)
@@ -434,6 +477,7 @@ class BlobFlowTest : TestRunner() {
 
         // Second chunk at offset chunk1.size — must append, not truncate
         http.patch("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             header("Upload-Offset", chunk1.size.toString())
             contentType(ContentType.Application.OctetStream)
@@ -445,6 +489,7 @@ class BlobFlowTest : TestRunner() {
 
         // Finalize with hash of the full concatenation — passes only if first chunk survived
         http.post("/v1/module/$testModuleId/blob-sessions/${session.sessionId}/finalize") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             contentType(ContentType.Application.Json)
             setBody("{}")
@@ -484,6 +529,7 @@ class BlobFlowTest : TestRunner() {
         }.body<SessionInfo>()
 
         http.patch("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             header("Upload-Offset", "0")
             contentType(ContentType.Application.OctetStream)
@@ -492,6 +538,7 @@ class BlobFlowTest : TestRunner() {
 
         // Attempt to rewind — server is at offset 1024, client sends 0
         http.patch("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             header("Upload-Offset", "0")
             contentType(ContentType.Application.OctetStream)
@@ -541,12 +588,14 @@ class BlobFlowTest : TestRunner() {
         }.body<SessionInfo>()
 
         http.patch("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", alice.deviceId.toString()) }
             addCredentials(alice)
             header("Upload-Offset", "0")
             contentType(ContentType.Application.OctetStream)
             setBody(blobData)
         }
         http.post("/v1/module/$testModuleId/blob-sessions/${session.sessionId}/finalize") {
+            url { parameters.append("device-id", alice.deviceId.toString()) }
             addCredentials(alice)
             contentType(ContentType.Application.Json)
             setBody("{}")
@@ -589,16 +638,19 @@ class BlobFlowTest : TestRunner() {
 
         // Bob tries to read session status — must fail (scope mismatch via accountId)
         http.get("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", alice.deviceId.toString()) }
             addCredentials(bob)
         }.status shouldBe HttpStatusCode.NotFound
 
         // Bob tries to abort Alice's session — must fail
         http.delete("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", alice.deviceId.toString()) }
             addCredentials(bob)
         }.status shouldBe HttpStatusCode.NotFound
 
         // Bob tries to finalize Alice's session — must fail
         http.post("/v1/module/$testModuleId/blob-sessions/${session.sessionId}/finalize") {
+            url { parameters.append("device-id", alice.deviceId.toString()) }
             addCredentials(bob)
             contentType(ContentType.Application.Json)
             setBody("{}")
@@ -629,12 +681,14 @@ class BlobFlowTest : TestRunner() {
             setBody("""{"sizeBytes": ${blobData.size}, "hashAlgorithm": "sha256", "hashHex": "$blobHash"}""")
         }.body<SessionInfo>()
         http.patch("/v1/module/$moduleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             header("Upload-Offset", "0")
             contentType(ContentType.Application.OctetStream)
             setBody(blobData)
         }
         http.post("/v1/module/$moduleId/blob-sessions/${session.sessionId}/finalize") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             contentType(ContentType.Application.Json)
             setBody("{}")
@@ -965,6 +1019,7 @@ class BlobFlowTest : TestRunner() {
         }.body<SessionInfo>()
 
         http.patch("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             header("Upload-Offset", "0")
             contentType(ContentType.Application.OctetStream)
@@ -973,6 +1028,7 @@ class BlobFlowTest : TestRunner() {
 
         // First finalize
         http.post("/v1/module/$testModuleId/blob-sessions/${session.sessionId}/finalize") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             contentType(ContentType.Application.Json)
             setBody("{}")
@@ -982,6 +1038,7 @@ class BlobFlowTest : TestRunner() {
 
         // Second finalize — should be idempotent
         http.post("/v1/module/$testModuleId/blob-sessions/${session.sessionId}/finalize") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             contentType(ContentType.Application.Json)
             setBody("{}")

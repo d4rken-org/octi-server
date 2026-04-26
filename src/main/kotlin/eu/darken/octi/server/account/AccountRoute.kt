@@ -33,22 +33,8 @@ class AccountRoute @Inject constructor(
 
     fun setup(rootRoute: Routing) {
         rootRoute.route("/v1/account") {
-            post {
-                try {
-                    create()
-                } catch (e: Exception) {
-                    log(TAG, ERROR) { "create() failed: ${e.asLog()}" }
-                    call.respond(HttpStatusCode.InternalServerError, "Account creation failed")
-                }
-            }
-            delete {
-                try {
-                    delete()
-                } catch (e: Exception) {
-                    log(TAG, ERROR) { "delete() failed: ${e.asLog()}" }
-                    call.respond(HttpStatusCode.InternalServerError, "Account deletion failed")
-                }
-            }
+            post { create() }
+            delete { delete() }
         }
     }
 
@@ -77,24 +63,15 @@ class AccountRoute @Inject constructor(
             return
         }
 
-        // Try linking device to account
-        val share = if (shareCode != null) {
-            shareRepo.getShare(shareCode).also {
-                if (it == null) {
-                    log(TAG, WARN) { "create(${deviceId.shortId()}): Could not resolve ShareCode" }
-                    call.respond(HttpStatusCode.Forbidden, "Invalid ShareCode")
-                }
-            } ?: return
-        } else {
-            null
+        val share = shareCode?.let {
+            shareRepo.consumeShare(it) ?: run {
+                log(TAG, WARN) { "create(${deviceId.shortId()}): Could not consume ShareCode" }
+                call.respond(HttpStatusCode.Forbidden, "Invalid ShareCode")
+                return
+            }
         }
 
         val account = if (share != null) {
-            if (!shareRepo.consumeShare(shareCode!!)) {
-                log(TAG, ERROR) { "create(${deviceId.shortId()}): Failed to consume Share" }
-                call.respond(HttpStatusCode.Forbidden, "ShareCode was already consumed")
-                return
-            }
             log(TAG, INFO) { "create(${deviceId.shortId()}): Share valid, adding device" }
             val resolved = accountRepo.getAccount(share.accountId)
             if (resolved == null) {

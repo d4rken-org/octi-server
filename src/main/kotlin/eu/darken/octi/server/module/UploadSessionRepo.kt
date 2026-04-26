@@ -4,6 +4,7 @@ import eu.darken.octi.server.App
 import eu.darken.octi.server.account.AccountId
 import eu.darken.octi.server.account.AccountStorageTracker
 import eu.darken.octi.server.common.AppScope
+import eu.darken.octi.server.common.launchPeriodicJob
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.*
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
@@ -32,6 +33,7 @@ class UploadSessionRepo @Inject constructor(
 ) {
 
     private val sessions = ConcurrentHashMap<String, SessionState>()
+    private val accountLocks = ConcurrentHashMap<AccountId, Mutex>()
 
     data class SessionState(
         val meta: UploadSessionMeta,
@@ -64,16 +66,13 @@ class UploadSessionRepo @Inject constructor(
      * Starts the background GC coroutine. Must be called after startup recovery completes.
      */
     fun startGC() {
-        appScope.launch(Dispatchers.IO) {
-            delay(config.moduleGCInterval.toMillis())
-            while (currentCoroutineContext().isActive) {
-                try {
-                    reapExpiredSessions()
-                } catch (e: Exception) {
-                    log(TAG, ERROR) { "Session GC failed: ${e.message}" }
-                }
-                delay(config.moduleGCInterval.toMillis())
-            }
+        appScope.launchPeriodicJob(
+            tag = TAG,
+            interval = config.moduleGCInterval,
+            initialDelay = config.moduleGCInterval,
+            onErrorMessage = "Session GC failed",
+        ) {
+            reapExpiredSessions()
         }
     }
 
@@ -100,14 +99,14 @@ class UploadSessionRepo @Inject constructor(
 
     // region Session CRUD
 
-    fun createSession(
+    suspend fun createSession(
         accountId: AccountId,
         deviceId: DeviceId,
         moduleId: ModuleId,
         expectedSizeBytes: Long,
         hashAlgorithm: String?,
         hashHex: String?,
-    ): UploadSessionMeta {
+    ): UploadSessionMeta = lockForAccount(accountId).withLock {
         // Both ACTIVE and COMPLETE sessions count toward the cap. COMPLETE sessions still
         // hold reservedBytes until their PUT-commit (or expiry), and pre-fix only ACTIVE was
         // counted — letting an attacker create-finalize-repeat to accumulate COMPLETE.
@@ -166,15 +165,15 @@ class UploadSessionRepo @Inject constructor(
         sessions[sessionId] = SessionState(meta = meta, sessionDir = sessionDir)
 
         log(TAG) { "createSession: session=$sessionId, blob=$blobId, size=$expectedSizeBytes" }
-        return meta
+        meta
     }
 
     /**
      * Gets session metadata with scope validation and synchronous expiry check.
      */
-    fun getSession(sessionId: String, accountId: AccountId, moduleId: ModuleId): UploadSessionMeta? {
+    fun getSession(sessionId: String, accountId: AccountId, deviceId: DeviceId, moduleId: ModuleId): UploadSessionMeta? {
         val state = sessions[sessionId] ?: return null
-        if (!state.meta.matchesScope(accountId, moduleId)) return null
+        if (!state.meta.matchesScopeWithDevice(accountId, deviceId, moduleId)) return null
         if (state.meta.isExpired()) {
             // Fire-and-forget termination (don't block the caller)
             appScope.launch { terminateSession(sessionId, "expired_on_access") }
@@ -186,13 +185,14 @@ class UploadSessionRepo @Inject constructor(
     suspend fun appendToSession(
         sessionId: String,
         accountId: AccountId,
+        deviceId: DeviceId,
         moduleId: ModuleId,
         requestOffset: Long,
         channel: ByteReadChannel,
         maxChunkBytes: Long,
     ): AppendResult {
         val state = sessions[sessionId] ?: return AppendResult.SessionNotFound
-        if (!state.meta.matchesScope(accountId, moduleId)) return AppendResult.SessionNotFound
+        if (!state.meta.matchesScopeWithDevice(accountId, deviceId, moduleId)) return AppendResult.SessionNotFound
 
         return state.lock.withLock {
             val meta = state.meta
@@ -221,9 +221,11 @@ class UploadSessionRepo @Inject constructor(
                     if (read <= 0) break
 
                     if (bytesWritten + read > remaining) {
+                        raf.setLength(meta.offsetBytes)
                         return@withLock AppendResult.SizeExceeded
                     }
                     if (bytesWritten + read > maxChunkBytes) {
+                        raf.setLength(meta.offsetBytes)
                         return@withLock AppendResult.ChunkTooLarge
                     }
 
@@ -248,12 +250,13 @@ class UploadSessionRepo @Inject constructor(
     suspend fun finalizeSession(
         sessionId: String,
         accountId: AccountId,
+        deviceId: DeviceId,
         moduleId: ModuleId,
         hashAlgorithm: String?,
         hashHex: String?,
     ): FinalizeResult {
         val state = sessions[sessionId] ?: return FinalizeResult.SessionNotFound
-        if (!state.meta.matchesScope(accountId, moduleId)) return FinalizeResult.SessionNotFound
+        if (!state.meta.matchesScopeWithDevice(accountId, deviceId, moduleId)) return FinalizeResult.SessionNotFound
 
         return state.lock.withLock {
             val meta = state.meta
@@ -286,17 +289,15 @@ class UploadSessionRepo @Inject constructor(
                 return@withLock FinalizeResult.MissingChecksum
             }
 
-            if (meta.expectedSizeBytes > 0) {
-                val partFile = state.sessionDir.resolve(PART_FILENAME)
-                val actualHash = computeSha256(partFile)
-                if (actualHash != effectiveHex) {
-                    log(TAG, WARN) { "finalize: checksum mismatch for session=$sessionId" }
-                    return@withLock FinalizeResult.ChecksumMismatch
-                }
+            val partFile = state.sessionDir.resolve(PART_FILENAME)
+            if (!partFile.exists()) return@withLock FinalizeResult.ChecksumMismatch
+            val actualHash = computeSha256(partFile)
+            if (actualHash != effectiveHex) {
+                log(TAG, WARN) { "finalize: checksum mismatch for session=$sessionId" }
+                return@withLock FinalizeResult.ChecksumMismatch
             }
 
             // Rename payload.part to payload.blob (stays in sessions/ until commit)
-            val partFile = state.sessionDir.resolve(PART_FILENAME)
             val blobFile = state.sessionDir.resolve(BLOB_FILENAME)
             if (partFile.exists()) {
                 partFile.moveTo(blobFile, overwrite = true)
@@ -311,7 +312,6 @@ class UploadSessionRepo @Inject constructor(
                 hashAlgorithm = effectiveAlgorithm,
                 hashHex = effectiveHex,
                 lastActivityAt = Instant.now(),
-                idleTtlSeconds = COMPLETE_IDLE_TTL_SECONDS,
             )
             persistSessionMeta(state.sessionDir, updatedMeta)
             sessions[sessionId] = state.copy(meta = updatedMeta)
@@ -325,9 +325,9 @@ class UploadSessionRepo @Inject constructor(
 
     // region Abort & Terminate
 
-    suspend fun abortSession(sessionId: String, accountId: AccountId, moduleId: ModuleId): UploadSessionMeta? {
+    suspend fun abortSession(sessionId: String, accountId: AccountId, deviceId: DeviceId, moduleId: ModuleId): UploadSessionMeta? {
         val state = sessions[sessionId] ?: return null
-        if (!state.meta.matchesScope(accountId, moduleId)) return null
+        if (!state.meta.matchesScopeWithDevice(accountId, deviceId, moduleId)) return null
         return terminateSession(sessionId, "aborted")
     }
 
@@ -493,6 +493,10 @@ class UploadSessionRepo @Inject constructor(
         }
     }
 
+    fun sessionCountsByState(): Map<UploadSessionMeta.State, Int> {
+        return sessions.values.groupingBy { it.meta.state }.eachCount()
+    }
+
     // endregion
 
     // region Internals
@@ -502,6 +506,10 @@ class UploadSessionRepo @Inject constructor(
         val tempFile = sessionDir.resolve("${SESSION_META_FILENAME}.tmp")
         tempFile.writeText(serializer.encodeToString(meta))
         tempFile.moveTo(metaFile, overwrite = true)
+    }
+
+    private fun lockForAccount(accountId: AccountId): Mutex {
+        return accountLocks.computeIfAbsent(accountId) { Mutex() }
     }
 
     private fun computeSha256(file: Path): String {
@@ -522,13 +530,6 @@ class UploadSessionRepo @Inject constructor(
         internal const val PART_FILENAME = "payload.part"
         internal const val BLOB_FILENAME = "payload.blob"
         internal const val SESSION_META_FILENAME = "session.json"
-
-        /**
-         * Idle TTL applied when a session transitions to COMPLETE. After finalize, the only
-         * outstanding step is the client's module PUT — no slow-network rationale applies, so
-         * the long ACTIVE-state TTL is over-conservative.
-         */
-        internal const val COMPLETE_IDLE_TTL_SECONDS = 600L
 
         private val TAG = logTag("Upload", "Session", "Repo")
     }

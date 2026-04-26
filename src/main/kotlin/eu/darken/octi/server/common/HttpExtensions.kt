@@ -139,16 +139,25 @@ suspend fun RoutingContext.verifyCaller(tag: String, deviceRepo: DeviceRepo): De
     }
 
     // 2. Per-account rate-limit gate. Over-limit calls don't get to update lastSeen.
-    if (accountRateLimiter != null && !accountRateLimiter.tryAcquire(device.accountId)) {
-        call.respond(HttpStatusCode.TooManyRequests, "Account rate limit exceeded")
-        return null
+    if (accountRateLimiter != null) {
+        when (val decision = accountRateLimiter.acquire(device.accountId)) {
+            AccountRateLimiter.Decision.Accepted -> Unit
+            is AccountRateLimiter.Decision.Rejected -> {
+                call.response.header(HttpHeaders.RetryAfter, decision.retryAfterSeconds.toString())
+                call.respond(HttpStatusCode.TooManyRequests, "Account rate limit exceeded")
+                return null
+            }
+        }
     }
+
+    val trustedProxyIps = call.application.attributes.getOrNull(TrustedProxyIpsKey)
+        ?: IpHelper.DEFAULT_TRUSTED_PROXY_IPS
 
     // 3. Record metadata only for accepted calls.
     return touchAuthenticatedDevice(
         device = device,
         deviceRepo = deviceRepo,
-        clientIp = call.request.clientIp(),
+        clientIp = call.request.clientIp(trustedProxyIps),
         ipTracker = ipTracker,
         metadata = DeviceMetadataPatch(
             version = call.request.header("Octi-Device-Version"),

@@ -40,6 +40,12 @@ class ClientIpTest {
     }
 
     @Test
+    fun `configured trusted proxy uses X-Real-IP`() {
+        val request = createRequest(remoteAddress = "203.0.113.5", realIp = "198.51.100.7")
+        request.clientIp(trustedProxyIps = setOf("203.0.113.5")) shouldBe "198.51.100.7"
+    }
+
+    @Test
     fun `non-loopback ignores X-Forwarded-For`() {
         val request = createRequest(remoteAddress = "203.0.113.5", forwardedFor = "10.0.0.1")
         request.clientIp() shouldBe "203.0.113.5"

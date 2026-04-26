@@ -6,6 +6,7 @@
 # - OCTI_PORT: Server port (default: 8080)
 # - OCTI_DEBUG: Enable debug mode (default: false)
 # - OCTI_DATA_DIR: Override data directory path (default: auto-detect)
+# - OCTI_TRUSTED_PROXY_IPS: Comma-separated trusted proxy IPs (default: loopback)
 #
 # Default data path: /etc/octi-server
 # Deprecated path: /etc/octi-sync-server (still supported via auto-detection)
@@ -41,12 +42,45 @@ else
 fi
 
 # Build command arguments
-CMD_ARGS="--datapath=$DATA_DIR --port=$OCTI_PORT"
+CMD_ARGS=("--datapath=$DATA_DIR" "--port=$OCTI_PORT")
 
 # Add debug flag if enabled
 if [ "$OCTI_DEBUG" = "true" ]; then
-    CMD_ARGS="$CMD_ARGS --debug"
+    CMD_ARGS+=("--debug")
+fi
+
+add_optional_arg() {
+    local env_name="$1"
+    local flag_name="$2"
+    local value="${!env_name:-}"
+    if [ -n "$value" ]; then
+        CMD_ARGS+=("$flag_name=$value")
+    fi
+}
+
+add_optional_arg OCTI_ACCOUNT_QUOTA_MB "--account-quota-mb"
+add_optional_arg OCTI_MAX_BLOB_MB "--max-blob-mb"
+add_optional_arg OCTI_MAX_MODULE_DOCUMENT_KB "--max-module-document-kb"
+add_optional_arg OCTI_MAX_BLOB_PATCH_KB "--max-blob-patch-kb"
+add_optional_arg OCTI_MIN_FREE_DISK_MB "--min-free-disk-mb"
+add_optional_arg OCTI_MAX_UPLOAD_SESSIONS_PER_DEVICE "--max-upload-sessions-per-device"
+add_optional_arg OCTI_MAX_UPLOAD_SESSIONS_PER_ACCOUNT "--max-upload-sessions-per-account"
+add_optional_arg OCTI_IDLE_SESSION_TTL_SECONDS "--idle-session-ttl-seconds"
+add_optional_arg OCTI_COMPLETE_IDLE_SESSION_TTL_SECONDS "--complete-idle-session-ttl-seconds"
+add_optional_arg OCTI_ABSOLUTE_SESSION_TTL_SECONDS "--absolute-session-ttl-seconds"
+add_optional_arg OCTI_MAX_DEVICES_PER_ACCOUNT "--max-devices-per-account"
+add_optional_arg OCTI_MAX_MODULES_PER_DEVICE "--max-modules-per-device"
+add_optional_arg OCTI_MAX_BLOB_REFS_PER_MODULE "--max-blob-refs-per-module"
+add_optional_arg OCTI_ACCOUNT_RATE_LIMIT "--account-rate-limit"
+add_optional_arg OCTI_ACCOUNT_RATE_LIMIT_WINDOW_SECONDS "--account-rate-limit-window-seconds"
+add_optional_arg OCTI_RATE_LIMIT "--rate-limit"
+add_optional_arg OCTI_RATE_LIMIT_WINDOW_SECONDS "--rate-limit-window-seconds"
+add_optional_arg OCTI_PAYLOAD_LIMIT_KB "--payload-limit-kb"
+add_optional_arg OCTI_TRUSTED_PROXY_IPS "--trusted-proxy-ips"
+
+if [ "${OCTI_DISABLE_RATE_LIMITS:-false}" = "true" ]; then
+    CMD_ARGS+=("--disable-rate-limits")
 fi
 
 # Execute the application
-exec ./bin/octi-server $CMD_ARGS
+exec ./bin/octi-server "${CMD_ARGS[@]}"

@@ -27,7 +27,11 @@ private data class ClientRateState(
     val resetAt: Instant,
 )
 
-fun Application.installRateLimit(config: RateLimitConfig, ipLookup: IpAccountLookup? = null) {
+fun Application.installRateLimit(
+    config: RateLimitConfig,
+    ipLookup: IpAccountLookup? = null,
+    trustedProxyIps: Set<String> = IpHelper.DEFAULT_TRUSTED_PROXY_IPS,
+) {
     log(TAG, INFO) { "Rate limits are set to $config" }
     val rateLimitCache = ConcurrentHashMap<String, ClientRateState>()
 
@@ -65,17 +69,19 @@ fun Application.installRateLimit(config: RateLimitConfig, ipLookup: IpAccountLoo
     }
 
     intercept(ApplicationCallPipeline.Plugins) {
-        val clientIp = call.request.clientIp()
+        val clientIp = call.request.clientIp(trustedProxyIps)
         val now = Instant.now()
         val calldetails = "${call.request.httpMethod.value} ${call.request.uri}"
 
         var blocked = false
+        var retryAfterSeconds = config.resetTime.toSeconds()
         rateLimitCache.compute(clientIp) { _, existing ->
             val state = existing ?: ClientRateState(id = clientIp, resetAt = now + config.resetTime)
             when {
                 now.isAfter(state.resetAt) -> ClientRateState(clientIp, 1, now + config.resetTime)
                 state.requests >= config.limit -> {
                     blocked = true
+                    retryAfterSeconds = Duration.between(now, state.resetAt).toSeconds().coerceAtLeast(1L)
                     state
                 }
                 else -> state.copy(requests = state.requests + 1)
@@ -88,6 +94,7 @@ fun Application.installRateLimit(config: RateLimitConfig, ipLookup: IpAccountLoo
                 "accounts=${ctx.accounts.size} devices=$devices"
             } ?: "accounts=? (no auth seen)"
             log(TAG, WARN) { "Rate limits exceeded by ip=$clientIp $contextInfo -- $calldetails" }
+            call.response.header(HttpHeaders.RetryAfter, retryAfterSeconds.toString())
             call.respond(HttpStatusCode.TooManyRequests, "Rate limit exceeded. Try again later.")
             finish()
             return@intercept

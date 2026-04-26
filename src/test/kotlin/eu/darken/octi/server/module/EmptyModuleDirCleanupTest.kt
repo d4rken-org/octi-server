@@ -36,6 +36,7 @@ class EmptyModuleDirCleanupTest : TestRunner() {
         getModulesPath(creds).listDirectoryEntries().size shouldBe 1
 
         http.delete("/v1/module/$moduleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
         }.status shouldBe HttpStatusCode.OK
 
@@ -62,6 +63,7 @@ class EmptyModuleDirCleanupTest : TestRunner() {
         }.body<SessionInfo>()
 
         http.delete("/v1/module/$moduleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
         }.status shouldBe HttpStatusCode.OK
 

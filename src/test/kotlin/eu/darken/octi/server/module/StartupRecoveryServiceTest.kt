@@ -1,7 +1,7 @@
 package eu.darken.octi.server.module
 
 import eu.darken.octi.TestRunner
-import io.kotest.matchers.longs.shouldBeGreaterThan
+import eu.darken.octi.sha256Hex
 import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.Test
 import java.time.Instant
@@ -94,10 +94,8 @@ class StartupRecoveryServiceTest : TestRunner() {
         }
     }
 
-    // Documents current behaviour: recovery trusts blobRefs even if the on-disk payload is missing.
-    // A later GET /blobs/{id} would 404. If future hardening reconciles meta vs disk, update this test.
     @Test
-    fun `module references a blob whose payload is missing - quota still counts the ref`() {
+    fun `module reference with missing blob payload is not counted`() {
         val accountId = UUID.randomUUID()
         val deviceId = UUID.randomUUID()
         val moduleId = "eu.darken.octi.recovery.missingpayload"
@@ -112,7 +110,7 @@ class StartupRecoveryServiceTest : TestRunner() {
             )
             // deliberately NOT writing payload.blob
         }) {
-            component.storageTracker().getUsage(accountId).usedBytes shouldBe 200
+            component.storageTracker().getUsage(accountId).usedBytes shouldBe 0
         }
     }
 
@@ -184,6 +182,66 @@ class StartupRecoveryServiceTest : TestRunner() {
             )
             sessionDir = BlobFixtures.sessionDir(moduleDir, expired.sessionId).also {
                 BlobFixtures.writeSessionMeta(it, expired)
+            }
+        }) {
+            component.storageTracker().getUsage(accountId).reservedBytes shouldBe 0
+            sessionDir.exists() shouldBe false
+        }
+    }
+
+    @Test
+    fun `session whose metadata module scope does not match path is deleted`() {
+        val accountId = UUID.randomUUID()
+        val deviceId = UUID.randomUUID()
+        val pathModuleId = "eu.darken.octi.recovery.session.pathscope"
+        val metaModuleId = "eu.darken.octi.recovery.session.other"
+
+        lateinit var sessionDir: java.nio.file.Path
+
+        runTest2(seed = { cfg ->
+            BlobFixtures.seedAccountDevice(cfg.dataPath, accountId, deviceId)
+            val moduleDir = BlobFixtures.moduleDir(cfg.dataPath, accountId, deviceId, pathModuleId)
+            val session = BlobFixtures.sessionMeta(
+                accountId = accountId,
+                deviceId = deviceId,
+                moduleId = metaModuleId,
+                expectedSizeBytes = 100,
+                state = UploadSessionMeta.State.ACTIVE,
+            )
+            sessionDir = BlobFixtures.sessionDir(moduleDir, session.sessionId).also {
+                BlobFixtures.writeSessionMeta(it, session)
+                BlobFixtures.writeSessionPart(it, ByteArray(0))
+            }
+        }) {
+            component.storageTracker().getUsage(accountId).reservedBytes shouldBe 0
+            sessionDir.exists() shouldBe false
+        }
+    }
+
+    @Test
+    fun `COMPLETE session with mismatched SHA-256 is deleted`() {
+        val accountId = UUID.randomUUID()
+        val deviceId = UUID.randomUUID()
+        val moduleId = "eu.darken.octi.recovery.session.badhash"
+
+        lateinit var sessionDir: java.nio.file.Path
+
+        runTest2(seed = { cfg ->
+            BlobFixtures.seedAccountDevice(cfg.dataPath, accountId, deviceId)
+            val moduleDir = BlobFixtures.moduleDir(cfg.dataPath, accountId, deviceId, moduleId)
+            val session = BlobFixtures.sessionMeta(
+                accountId = accountId,
+                deviceId = deviceId,
+                moduleId = moduleId,
+                expectedSizeBytes = 4,
+                offsetBytes = 4,
+                state = UploadSessionMeta.State.COMPLETE,
+                hashAlgorithm = "sha256",
+                hashHex = "0".repeat(64),
+            )
+            sessionDir = BlobFixtures.sessionDir(moduleDir, session.sessionId).also {
+                BlobFixtures.writeSessionMeta(it, session)
+                BlobFixtures.writeSessionBlob(it, "data".toByteArray())
             }
         }) {
             component.storageTracker().getUsage(accountId).reservedBytes shouldBe 0
@@ -264,15 +322,18 @@ class StartupRecoveryServiceTest : TestRunner() {
         runTest2(seed = { cfg ->
             BlobFixtures.seedAccountDevice(cfg.dataPath, accountId, deviceId)
             val moduleDir = BlobFixtures.moduleDir(cfg.dataPath, accountId, deviceId, moduleId)
+            val payload = ByteArray(500)
             val session = BlobFixtures.sessionMeta(
                 accountId = accountId, deviceId = deviceId, moduleId = moduleId,
                 expectedSizeBytes = 500,
                 offsetBytes = 0,
                 state = UploadSessionMeta.State.ACTIVE,
+                hashAlgorithm = "sha256",
+                hashHex = payload.sha256Hex(),
             )
             sessionDir = BlobFixtures.sessionDir(moduleDir, session.sessionId).also {
                 BlobFixtures.writeSessionMeta(it, session)
-                BlobFixtures.writeSessionBlob(it, ByteArray(500))
+                BlobFixtures.writeSessionBlob(it, payload)
                 // no payload.part
             }
         }) {
@@ -329,11 +390,8 @@ class StartupRecoveryServiceTest : TestRunner() {
         }
     }
 
-    // Documents current behaviour: recovery blindly promotes ACTIVE→COMPLETE when only payload.blob
-    // is present, without verifying the blob's size matches expectedSizeBytes. Mismatched size is
-    // loaded as-is; a later commit may expose this. Flag as follow-up, don't paper over.
     @Test
-    fun `ACTIVE promoted from payload blob with size mismatch is loaded as-is`() {
+    fun `ACTIVE promoted from payload blob with size mismatch is deleted`() {
         val accountId = UUID.randomUUID()
         val deviceId = UUID.randomUUID()
         val moduleId = "eu.darken.octi.recovery.session.promotedmismatch"
@@ -351,7 +409,7 @@ class StartupRecoveryServiceTest : TestRunner() {
             BlobFixtures.writeSessionMeta(sDir, session)
             BlobFixtures.writeSessionBlob(sDir, ByteArray(123))  // not 500
         }) {
-            component.storageTracker().getUsage(accountId).reservedBytes shouldBeGreaterThan 0
+            component.storageTracker().getUsage(accountId).reservedBytes shouldBe 0
         }
     }
 }
