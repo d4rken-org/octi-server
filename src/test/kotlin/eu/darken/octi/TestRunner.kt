@@ -27,6 +27,10 @@ abstract class TestRunner {
         port = 16023,
         isDebug = true,
         rateLimit = null,
+        // Disable the disk-space gate by default so existing tests don't depend on the
+        // amount of free space on the CI box. Tests that exercise the gate set this
+        // explicitly via baseConfig.copy(...).
+        minFreeDiskSpaceBytes = 0L,
     )
 
     data class TestEnvironment(

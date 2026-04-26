@@ -7,6 +7,7 @@ import eu.darken.octi.server.common.debug.logging.asLog
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
 import eu.darken.octi.server.common.debug.logging.shortId
+import eu.darken.octi.server.common.OctiResponseHeaders
 import eu.darken.octi.server.common.parseStrongEtag
 import eu.darken.octi.server.common.verifyCaller
 import eu.darken.octi.server.device.Device
@@ -170,6 +171,7 @@ class ModuleRoute @Inject constructor(
                 return
             }
             is ModuleLifecycleService.LegacyWriteResult.QuotaExceeded -> {
+                call.response.header(OctiResponseHeaders.REASON, OctiResponseHeaders.ACCOUNT_QUOTA_EXCEEDED)
                 call.respond(HttpStatusCode.InsufficientStorage, "Account storage quota exceeded")
                 return
             }
@@ -280,6 +282,7 @@ class ModuleRoute @Inject constructor(
                 return
             }
             is ModuleLifecycleService.CommitResult.QuotaExceeded -> {
+                call.response.header(OctiResponseHeaders.REASON, OctiResponseHeaders.ACCOUNT_QUOTA_EXCEEDED)
                 call.respond(HttpStatusCode.InsufficientStorage, "Account storage quota exceeded")
                 return
             }

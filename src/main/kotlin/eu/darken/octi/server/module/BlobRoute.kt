@@ -2,6 +2,8 @@ package eu.darken.octi.server.module
 
 import eu.darken.octi.server.App
 import eu.darken.octi.server.account.AccountStorageTracker
+import eu.darken.octi.server.common.DiskSpaceProbe
+import eu.darken.octi.server.common.OctiResponseHeaders
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.*
 import eu.darken.octi.server.common.debug.logging.asLog
 import eu.darken.octi.server.common.debug.logging.log
@@ -35,11 +37,13 @@ class BlobRoute @Inject constructor(
     private val storageTracker: AccountStorageTracker,
     private val lifecycleService: ModuleLifecycleService,
     private val syncNotifier: SyncNotifier,
+    private val diskSpaceProbe: DiskSpaceProbe,
 ) {
 
     private sealed interface CreateSessionOutcome {
         data class Created(val session: UploadSessionMeta) : CreateSessionOutcome
         data object QuotaExceeded : CreateSessionOutcome
+        data object DiskSpaceLow : CreateSessionOutcome
         data object ModuleLimitExceeded : CreateSessionOutcome
         data class SessionLimitExceeded(val limit: Int) : CreateSessionOutcome
         data class Failed(val error: Exception) : CreateSessionOutcome
@@ -423,6 +427,9 @@ class BlobRoute @Inject constructor(
         // target.sync so two concurrent requests can't both pass the count check and end up
         // creating distinct module dirs that together exceed the cap.
         val outcome = target.sync.withLock {
+            if (!diskSpaceProbe.hasHeadroom(request.sizeBytes)) {
+                return@withLock CreateSessionOutcome.DiskSpaceLow
+            }
             if (!moduleRepo.moduleDirExists(target, moduleId) &&
                 moduleRepo.countModuleDirs(target) >= config.maxModulesPerDevice) {
                 return@withLock CreateSessionOutcome.ModuleLimitExceeded
@@ -452,7 +459,13 @@ class BlobRoute @Inject constructor(
 
         when (outcome) {
             is CreateSessionOutcome.QuotaExceeded -> {
+                call.response.header(OctiResponseHeaders.REASON, OctiResponseHeaders.ACCOUNT_QUOTA_EXCEEDED)
                 call.respond(HttpStatusCode.InsufficientStorage, "Account storage quota exceeded")
+                return
+            }
+            is CreateSessionOutcome.DiskSpaceLow -> {
+                call.response.header(OctiResponseHeaders.REASON, OctiResponseHeaders.SERVER_DISK_LOW)
+                call.respond(HttpStatusCode.InsufficientStorage, "Server is low on disk space")
                 return
             }
             is CreateSessionOutcome.ModuleLimitExceeded -> {
@@ -520,6 +533,30 @@ class BlobRoute @Inject constructor(
         val requestOffset = call.request.headers["Upload-Offset"]?.toLongOrNull()
         if (requestOffset == null) {
             call.respond(HttpStatusCode.BadRequest, "Missing or invalid Upload-Offset header")
+            return
+        }
+
+        // Cheap pre-checks so a stale or finalized sessionId routes to the correct 4xx
+        // rather than getting masked by the disk gate. sessionRepo.appendToSession redoes
+        // these under its mutex, so this is just for response routing.
+        val session = sessionRepo.getSession(sessionId, caller.accountId, moduleId)
+        if (session == null) {
+            call.respond(HttpStatusCode.NotFound, "Session not found")
+            return
+        }
+        if (session.state != UploadSessionMeta.State.ACTIVE) {
+            call.respond(HttpStatusCode.Conflict, "Session is not active (state: ${session.state.name.lowercase()})")
+            return
+        }
+        // Size the disk gate to the server-side upper bound on this PATCH's writable
+        // bytes — RequestBodyLimit + ChunkTooLarge already cap actual writes, so
+        // trusting client-supplied Content-Length to shrink the gate would only weaken
+        // disk protection without buying anything.
+        val remainingBytes = (session.expectedSizeBytes - session.offsetBytes).coerceAtLeast(0L)
+        val incomingUpperBound = minOf(config.maxBlobPatchBytes, remainingBytes)
+        if (!diskSpaceProbe.hasHeadroom(incomingUpperBound)) {
+            call.response.header(OctiResponseHeaders.REASON, OctiResponseHeaders.SERVER_DISK_LOW)
+            call.respond(HttpStatusCode.InsufficientStorage, "Server is low on disk space")
             return
         }
 

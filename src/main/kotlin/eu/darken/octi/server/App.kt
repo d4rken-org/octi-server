@@ -56,6 +56,10 @@ class App @Inject constructor(
         val accountQuotaBytes: Long = 50L * 1024 * 1024, // 50 MB default
         val maxBlobBytes: Long = 10L * 1024 * 1024, // 10 MB default
         val maxModuleDocumentBytes: Long = 256L * 1024, // 256 KB default
+        // Host-disk safety floor: blob uploads are rejected when usable free space on the
+        // datapath filesystem would drop below this after the requested write. Set to 0
+        // (or any non-positive value) only in tests — the CLI helper rejects 0/negative.
+        val minFreeDiskSpaceBytes: Long = 500L * 1024 * 1024, // 500 MB default
         val maxActiveUploadSessionsPerDevice: Int = 8,
         val maxActiveUploadSessionsPerAccount: Int = 32,
         val idleSessionTtlSeconds: Long = 3600, // 1 hour for ACTIVE state
@@ -76,13 +80,20 @@ class App @Inject constructor(
         @JvmStatic
         fun main(args: Array<String>) {
             log(TAG, INFO) { "Program arguments: ${args.joinToString()}" }
+            createComponent(parseConfig(args)).application().launch()
+        }
 
+        /**
+         * Parses CLI flags into a [Config]. Extracted from `main` so tests can exercise
+         * flag parsing without booting the server.
+         */
+        internal fun parseConfig(args: Array<String>): Config {
             val defaults = Config(
                 port = 0,
                 dataPath = Path("/tmp/placeholder"),
             )
 
-            val config = Config(
+            return Config(
                 isDebug = args.any { it.startsWith("--debug") },
                 port = args
                     .singleOrNull { it.startsWith("--port") }
@@ -101,9 +112,9 @@ class App @Inject constructor(
                     ?: defaults.accountQuotaBytes,
                 maxBlobBytes = parseSizeFlag(args, "--max-blob-mb", 1024L * 1024L)
                     ?: defaults.maxBlobBytes,
+                minFreeDiskSpaceBytes = parseSizeFlag(args, "--min-free-disk-mb", 1024L * 1024L)
+                    ?: defaults.minFreeDiskSpaceBytes,
             )
-
-            createComponent(config).application().launch()
         }
 
         /**
