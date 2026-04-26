@@ -56,9 +56,6 @@ class App @Inject constructor(
         val accountQuotaBytes: Long = 50L * 1024 * 1024, // 50 MB default
         val maxBlobBytes: Long = 10L * 1024 * 1024, // 10 MB default
         val maxModuleDocumentBytes: Long = 256L * 1024, // 256 KB default
-        // Host-disk safety floor: blob uploads are rejected when usable free space on the
-        // datapath filesystem would drop below this after the requested write. Set to 0
-        // (or any non-positive value) only in tests — the CLI helper rejects 0/negative.
         val minFreeDiskSpaceBytes: Long = 500L * 1024 * 1024, // 500 MB default
         val maxActiveUploadSessionsPerDevice: Int = 8,
         val maxActiveUploadSessionsPerAccount: Int = 32,
@@ -83,10 +80,6 @@ class App @Inject constructor(
             createComponent(parseConfig(args)).application().launch()
         }
 
-        /**
-         * Parses CLI flags into a [Config]. Extracted from `main` so tests can exercise
-         * flag parsing without booting the server.
-         */
         internal fun parseConfig(args: Array<String>): Config {
             val defaults = Config(
                 port = 0,
@@ -122,12 +115,19 @@ class App @Inject constructor(
          * present. Throws on malformed/non-positive values so a typo'd config
          * fails the boot rather than silently flipping to a default.
          */
-        private fun parseSizeFlag(args: Array<String>, flag: String, unitBytes: Long): Long? {
-            val raw = args.singleOrNull { it.startsWith("$flag=") } ?: return null
-            val value = raw.substringAfter('=').toLongOrNull()
-                ?: throw IllegalArgumentException("Invalid value for $flag: '${raw.substringAfter('=')}'")
+        internal fun parseSizeFlag(args: Array<String>, flag: String, unitBytes: Long): Long? {
+            val matches = args.filter { it.startsWith("$flag=") }
+            if (matches.isEmpty()) return null
+            require(matches.size == 1) { "$flag specified more than once: ${matches.joinToString(" ")}" }
+            val rawValue = matches.single().substringAfter('=')
+            val value = rawValue.toLongOrNull()
+                ?: throw IllegalArgumentException("Invalid value for $flag: '$rawValue'")
             require(value > 0) { "$flag must be positive, got $value" }
-            return value * unitBytes
+            return try {
+                Math.multiplyExact(value, unitBytes)
+            } catch (e: ArithmeticException) {
+                throw IllegalArgumentException("$flag value $value overflows when scaled by $unitBytes")
+            }
         }
 
         fun createComponent(config: Config): AppComponent {

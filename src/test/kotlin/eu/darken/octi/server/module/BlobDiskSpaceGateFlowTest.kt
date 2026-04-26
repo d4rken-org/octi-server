@@ -11,14 +11,6 @@ import org.junit.jupiter.api.Test
 import java.nio.file.Files
 import java.util.*
 
-/**
- * End-to-end HTTP probes of the `--min-free-disk-mb` safety floor. The gate is wired
- * into [BlobRoute.createSession] (inside `target.sync.withLock`) and into the cheap
- * pre-checks of [BlobRoute.appendToSession]. Tests pin: 507 + `X-Octi-Reason` header,
- * no quota leak on rejection, ordering vs. existence checks, and that the PATCH gate
- * sizes its headroom request to the actual remaining bytes (not the unconditional
- * `maxBlobPatchBytes`).
- */
 class BlobDiskSpaceGateFlowTest : TestRunner() {
 
     private val moduleId = "eu.darken.octi.diskspace.gate"
@@ -94,6 +86,31 @@ class BlobDiskSpaceGateFlowTest : TestRunner() {
     }
 
     @Test
+    fun `PATCH with wrong offset returns 409 not 507 even when disk space is low`() {
+        runTest2(appConfig = baseConfig.copy(minFreeDiskSpaceBytes = Long.MAX_VALUE)) {
+            val creds = createDevice()
+            // Seed a real ACTIVE session at offset=0 so existence/state checks pass.
+            val seeded = component.sessionRepo().createSession(
+                accountId = UUID.fromString(creds.account),
+                deviceId = creds.deviceId,
+                moduleId = moduleId,
+                expectedSizeBytes = 100,
+                hashAlgorithm = null,
+                hashHex = null,
+            )
+
+            // Offset of 50 doesn't match the actual offset (0). Offset check must fire
+            // before the disk gate, so client sees 409 with the real expected offset.
+            http.patch("/v1/module/$moduleId/blob-sessions/${seeded.sessionId}") {
+                addCredentials(creds)
+                header("Upload-Offset", "50")
+                contentType(ContentType.Application.OctetStream)
+                setBody(ByteArray(10))
+            }.status shouldBe HttpStatusCode.Conflict
+        }
+    }
+
+    @Test
     fun `quota rejection carries account_quota_exceeded reason header`() {
         runTest2(
             appConfig = baseConfig.copy(
@@ -152,7 +169,6 @@ class BlobDiskSpaceGateFlowTest : TestRunner() {
         runTest2(appConfig = cfg.copy(minFreeDiskSpaceBytes = floor)) {
             val creds = createDevice()
 
-            // 1-byte session — fits easily within the 100 KB margin even with the gate active.
             val session = http.post("/v1/module/$moduleId/blob-sessions") {
                 url { parameters.append("device-id", creds.deviceId.toString()) }
                 addCredentials(creds)
@@ -162,9 +178,6 @@ class BlobDiskSpaceGateFlowTest : TestRunner() {
                 status shouldBe HttpStatusCode.Created
             }.body<SessionInfo>()
 
-            // PATCH with the single byte must succeed: gate sees remaining=1, contentLength=1,
-            // takes the min, requests only 1 byte of headroom — well within 100 KB. Without the
-            // `min(...)` fix it would unconditionally request maxBlobPatchBytes (1 MB) and 507.
             http.patch("/v1/module/$moduleId/blob-sessions/${session.sessionId}") {
                 addCredentials(creds)
                 header("Upload-Offset", "0")

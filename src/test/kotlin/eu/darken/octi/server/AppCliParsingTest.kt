@@ -43,4 +43,21 @@ class AppCliParsingTest {
             App.parseConfig(baseArgs + "--min-free-disk-mb=-1")
         }
     }
+
+    @Test
+    fun `--min-free-disk-mb rejects duplicate flags`() {
+        val ex = shouldThrow<IllegalArgumentException> {
+            App.parseConfig(baseArgs + "--min-free-disk-mb=100" + "--min-free-disk-mb=200")
+        }
+        ex.message!! shouldContain "--min-free-disk-mb"
+    }
+
+    @Test
+    fun `--min-free-disk-mb rejects values that overflow when scaled`() {
+        // value * 1_048_576 must fit in a Long; Long.MAX_VALUE / (1024*1024) ≈ 8.8e12.
+        val tooBig = (Long.MAX_VALUE / (1024L * 1024L)) + 1L
+        shouldThrow<IllegalArgumentException> {
+            App.parseConfig(baseArgs + "--min-free-disk-mb=$tooBig")
+        }
+    }
 }

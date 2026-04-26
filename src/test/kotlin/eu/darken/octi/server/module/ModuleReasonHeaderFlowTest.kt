@@ -7,12 +7,6 @@ import io.ktor.http.*
 import org.junit.jupiter.api.Test
 import java.util.*
 
-/**
- * Pins the `X-Octi-Reason: account_quota_exceeded` header on the two ModuleRoute paths
- * that 507 on quota: legacy `POST /v1/module/{id}` and `PUT /v1/module/{id}` commit.
- * Companion to BlobDiskSpaceGateFlowTest, which covers the BlobRoute side of the same
- * header contract.
- */
 class ModuleReasonHeaderFlowTest : TestRunner() {
 
     private val moduleId = "eu.darken.octi.module.reason"

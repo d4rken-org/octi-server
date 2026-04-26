@@ -536,9 +536,8 @@ class BlobRoute @Inject constructor(
             return
         }
 
-        // Cheap pre-checks so a stale or finalized sessionId routes to the correct 4xx
-        // rather than getting masked by the disk gate. sessionRepo.appendToSession redoes
-        // these under its mutex, so this is just for response routing.
+        // Existence/state/offset checks before the disk gate so a stale or wrong-offset
+        // request routes to its proper 4xx instead of getting masked by 507 when disk is low.
         val session = sessionRepo.getSession(sessionId, caller.accountId, moduleId)
         if (session == null) {
             call.respond(HttpStatusCode.NotFound, "Session not found")
@@ -548,10 +547,12 @@ class BlobRoute @Inject constructor(
             call.respond(HttpStatusCode.Conflict, "Session is not active (state: ${session.state.name.lowercase()})")
             return
         }
-        // Size the disk gate to the server-side upper bound on this PATCH's writable
-        // bytes — RequestBodyLimit + ChunkTooLarge already cap actual writes, so
-        // trusting client-supplied Content-Length to shrink the gate would only weaken
-        // disk protection without buying anything.
+        if (requestOffset != session.offsetBytes) {
+            call.respond(HttpStatusCode.Conflict, "Upload offset mismatch: expected ${session.offsetBytes}")
+            return
+        }
+        // Size against the server-side upper bound; client Content-Length isn't trusted
+        // because it could only shrink the gate, weakening disk protection.
         val remainingBytes = (session.expectedSizeBytes - session.offsetBytes).coerceAtLeast(0L)
         val incomingUpperBound = minOf(config.maxBlobPatchBytes, remainingBytes)
         if (!diskSpaceProbe.hasHeadroom(incomingUpperBound)) {
