@@ -1,6 +1,7 @@
 package eu.darken.octi.server
 
 import eu.darken.octi.server.common.AppScope
+import eu.darken.octi.server.common.DiskSpaceProbe
 import eu.darken.octi.server.common.RateLimitConfig
 import eu.darken.octi.server.common.debug.logging.ConsoleLogger
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.*
@@ -22,12 +23,14 @@ class App @Inject constructor(
     private val server: Server,
     private val startupRecovery: StartupRecoveryService,
     private val sessionRepo: UploadSessionRepo,
+    private val diskSpaceProbe: DiskSpaceProbe,
     @Suppress("unused") private val debugFlagMonitor: DebugFlagMonitor,
 ) {
 
     fun launch() {
         startupRecovery.recover()
         sessionRepo.startGC()
+        diskSpaceProbe.checkAndLogStartup()
         server.start()
     }
 

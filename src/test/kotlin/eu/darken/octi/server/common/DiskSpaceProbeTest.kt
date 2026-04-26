@@ -99,4 +99,23 @@ class DiskSpaceProbeTest {
         p.usableBytes()
         p.snapshot.atMs shouldBeGreaterThan firstStamp
     }
+
+    @Test
+    fun `checkAndLogStartup runs cleanly across all configurations`() {
+        // Each branch exercises its own log path; the assertion is just that
+        // the method completes without throwing and (where the gate is enabled)
+        // populates the snapshot.
+        probe(floorBytes = 0L).apply {
+            checkAndLogStartup()
+            snapshot.atMs shouldBe 0L  // gate disabled — no probe runs
+        }
+        probe(floorBytes = 1L).apply {
+            checkAndLogStartup()
+            snapshot.atMs shouldBeGreaterThan 0L
+        }
+        probe(floorBytes = Long.MAX_VALUE).apply {
+            checkAndLogStartup()
+            snapshot.atMs shouldBeGreaterThan 0L
+        }
+    }
 }

@@ -2,6 +2,8 @@ package eu.darken.octi.server.common
 
 import eu.darken.octi.server.App
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.ERROR
+import eu.darken.octi.server.common.debug.logging.Logging.Priority.INFO
+import eu.darken.octi.server.common.debug.logging.Logging.Priority.WARN
 import eu.darken.octi.server.common.debug.logging.asLog
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
@@ -41,6 +43,24 @@ class DiskSpaceProbe @Inject constructor(
         val usable = usableBytes()
         if (usable < 0L) return false
         return usable - incomingBytes >= config.minFreeDiskSpaceBytes
+    }
+
+    fun checkAndLogStartup() {
+        val floor = config.minFreeDiskSpaceBytes
+        if (floor <= 0L) {
+            log(TAG, INFO) { "disk-space gate disabled (minFreeDiskSpaceBytes=$floor)" }
+            return
+        }
+        val usable = usableBytes()
+        when {
+            usable < 0L -> log(TAG, WARN) {
+                "initial disk-space probe failed; gate will fail-closed until probe succeeds"
+            }
+            usable < floor -> log(TAG, WARN) {
+                "disk-space below floor at startup: usable=$usable, floor=$floor — blob uploads will be rejected with 507 until disk recovers"
+            }
+            else -> log(TAG, INFO) { "disk-space OK: usable=$usable, floor=$floor" }
+        }
     }
 
     companion object {
