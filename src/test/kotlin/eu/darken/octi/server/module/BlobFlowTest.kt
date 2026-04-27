@@ -624,6 +624,50 @@ class BlobFlowTest : TestRunner() {
     }
 
     @Test
+    fun `peer device on same account reads module and blob`() = runTest2 {
+        val alice = createDevice()
+        val bob = createDevice(alice) // bob joins alice's account via share code
+
+        val moduleEtag1 = createModule(alice, testModuleId)
+        val blobData = "shared-blob-content".toByteArray()
+        val sharedDoc = "shared-doc".toByteArray()
+        val (blobId, _) = commitBlob(alice, testModuleId, blobData, moduleEtag1, sharedDoc)
+
+        // Bob reads alice's module document
+        readModuleRaw(bob, testModuleId, alice.deviceId).apply {
+            status shouldBe HttpStatusCode.OK
+            bodyAsText() shouldBe "shared-doc"
+        }
+
+        // Bob lists alice's blobs and sees the one alice committed
+        http.get("/v1/module/$testModuleId/blobs") {
+            url { parameters.append("device-id", alice.deviceId.toString()) }
+            addCredentials(bob)
+        }.apply {
+            status shouldBe HttpStatusCode.OK
+            val list = body<BlobListInfo>()
+            list.blobs.size shouldBe 1
+            list.blobs[0].blobId shouldBe blobId
+            list.blobs[0].sizeBytes shouldBe blobData.size.toLong()
+            list.blobs[0].hashAlgorithm shouldBe "sha256"
+            list.blobs[0].hashHex shouldBe blobData.sha256Hex()
+        }
+
+        // Bob downloads the blob bytes
+        http.get("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", alice.deviceId.toString()) }
+            addCredentials(bob)
+        }.apply {
+            status shouldBe HttpStatusCode.OK
+            headers["ETag"] shouldNotBe null
+            readRawBytes() shouldBe blobData
+        }
+
+        // Quota is account-scoped, not device-scoped
+        getUsedBytes(alice) shouldBe getUsedBytes(bob)
+    }
+
+    @Test
     fun `cross-account device cannot probe another account's session`() = runTest2 {
         val alice = createDevice()
         val bob = createDevice()
