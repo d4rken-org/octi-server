@@ -253,6 +253,83 @@ class BlobRangeFlowTest : TestRunner() {
             status shouldBe HttpStatusCode.NotModified
         }
     }
+
+    @Test
+    fun `full GET emits Last-Modified header`() = runTest2 {
+        val creds = createDevice()
+        val payload = deterministicPayload(100)
+        val blobId = commitBlob(creds, payload)
+
+        http.get("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+        }.apply {
+            status shouldBe HttpStatusCode.OK
+            // RFC 1123 dates always end with "GMT" and contain a 4-digit year.
+            val lastMod = headers[HttpHeaders.LastModified]
+            lastMod shouldNotBe null
+            lastMod!!.endsWith("GMT") shouldBe true
+        }
+    }
+
+    @Test
+    fun `If-Range matching the current ETag honors the Range`() = runTest2 {
+        val creds = createDevice()
+        val payload = deterministicPayload(100)
+        val blobId = commitBlob(creds, payload)
+
+        val first = http.get("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+        }
+        val etag = first.headers[HttpHeaders.ETag]!!
+
+        http.get("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header(HttpHeaders.IfRange, etag)
+            header(HttpHeaders.Range, "bytes=0-9")
+        }.apply {
+            status shouldBe HttpStatusCode.PartialContent
+            bodyAsBytes().size shouldBe 10
+        }
+    }
+
+    @Test
+    fun `If-Range with stale ETag falls back to full 200`() = runTest2 {
+        val creds = createDevice()
+        val payload = deterministicPayload(100)
+        val blobId = commitBlob(creds, payload)
+
+        http.get("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header(HttpHeaders.IfRange, "\"stale-etag-does-not-match\"")
+            header(HttpHeaders.Range, "bytes=0-9")
+        }.apply {
+            status shouldBe HttpStatusCode.OK
+            bodyAsBytes().size shouldBe payload.size
+        }
+    }
+
+    @Test
+    fun `malformed If-Range falls back to full 200 not 400`() = runTest2 {
+        val creds = createDevice()
+        val payload = deterministicPayload(100)
+        val blobId = commitBlob(creds, payload)
+
+        http.get("/v1/module/$testModuleId/blobs/$blobId") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header(HttpHeaders.IfRange, "completely-malformed-not-etag-not-date")
+            header(HttpHeaders.Range, "bytes=0-9")
+        }.apply {
+            // Per RFC 7233 §3.2 the receiver MUST ignore the Range when If-Range
+            // doesn't match — falling back to a full 200, not rejecting the request.
+            status shouldBe HttpStatusCode.OK
+            bodyAsBytes().size shouldBe payload.size
+        }
+    }
 }
 
 private suspend fun HttpResponse.bodyAsBytes(): ByteArray = readRawBytes()

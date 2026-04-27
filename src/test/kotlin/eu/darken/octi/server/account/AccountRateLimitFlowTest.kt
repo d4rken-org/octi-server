@@ -45,4 +45,20 @@ class AccountRateLimitFlowTest : TestRunner() {
         // b's bucket is independent.
         http.get("/v1/account/storage") { addCredentials(b) }.status shouldBe HttpStatusCode.OK
     }
+
+    @Test
+    fun `accountRateLimit of 0 disables the gate`() = runTest2(
+        appConfig = baseConfig.copy(
+            accountRateLimit = 0,
+            accountRateLimitWindowSeconds = 60,
+        ),
+    ) {
+        // --disable-rate-limits sets accountRateLimit = 0. Verify the per-account gate is
+        // genuinely off — not just permissive — by issuing more requests than any normal
+        // limit would allow.
+        val creds = createDevice()
+        repeat(50) {
+            http.get("/v1/account/storage") { addCredentials(creds) }.status shouldBe HttpStatusCode.OK
+        }
+    }
 }

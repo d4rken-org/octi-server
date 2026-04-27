@@ -64,6 +64,7 @@ class StartupRecoveryService @Inject constructor(
                 }
 
                 modulesDir.listDirectoryEntries().forEach modules@{ moduleDir ->
+                    try {
                     // Single source of truth for legacy/non-v1 "bytes accounted for"; v1 blob
                     // refs are counted only after their live payloads have been validated.
                     val accounting = moduleRepo.accountForModule(moduleDir)
@@ -71,8 +72,24 @@ class StartupRecoveryService @Inject constructor(
                     if (moduleMeta == null) {
                         usedBytes += accounting.bytes
                     } else {
-                        val validatedMeta = validateLiveBlobRefs(moduleDir, moduleMeta)
-                        if (validatedMeta.blobRefs != moduleMeta!!.blobRefs) {
+                        var validatedMeta = validateLiveBlobRefs(moduleDir, moduleMeta)
+                        // Auto-heal documentSizeBytes when on-disk payload.blob has drifted
+                        // from the metadata-recorded size (crash mid-document-write before
+                        // module.json rename). Plan §"Startup Recovery" item 4.
+                        val docFile = moduleDir.resolve("payload.blob")
+                        val actualDocSize = if (docFile.exists()) docFile.fileSize() else 0L
+                        if (actualDocSize != validatedMeta.documentSizeBytes) {
+                            log(TAG) {
+                                "recovery.document_size_normalized: ${moduleDir.fileName} ${validatedMeta.documentSizeBytes} -> $actualDocSize"
+                            }
+                            validatedMeta = validatedMeta.copy(
+                                documentSizeBytes = actualDocSize,
+                                etag = ModuleRepo.generateRandomEtag(),
+                                modifiedAt = Instant.now(),
+                            )
+                        }
+                        // Persist once if either blobRefs or documentSizeBytes changed.
+                        if (validatedMeta != moduleMeta) {
                             persistModuleMeta(moduleDir, validatedMeta)
                         }
                         moduleMeta = validatedMeta
@@ -87,7 +104,7 @@ class StartupRecoveryService @Inject constructor(
                             prefixDir.listDirectoryEntries().forEach { storageKeyDir ->
                                 val key = storageKeyDir.fileName.toString()
                                 if (key !in liveStorageKeys) {
-                                    log(TAG) { "recovery.orphan_blob_reclaimed: $storageKeyDir" }
+                                    log(TAG) { "recovery.orphan_reclaimed: $storageKeyDir" }
                                     try {
                                         storageKeyDir.deleteRecursively()
                                     } catch (e: Exception) {
@@ -103,6 +120,7 @@ class StartupRecoveryService @Inject constructor(
                     if (!sessionsDir.exists()) return@modules
 
                     sessionsDir.listDirectoryEntries().forEach sessions@{ sessionDir ->
+                        try {
                         val sessionMetaFile = sessionDir.resolve(UploadSessionRepo.SESSION_META_FILENAME)
                         if (!sessionMetaFile.exists()) {
                             log(TAG) { "recovery.session_malformed: no session.json in $sessionDir" }
@@ -221,6 +239,14 @@ class StartupRecoveryService @Inject constructor(
                             log(TAG) { "recovery.session_malformed: missing staged payload for ${sessionMeta.sessionId}" }
                             sessionDir.deleteRecursively()
                         }
+                        } catch (e: Exception) {
+                            log(TAG, WARN) { "recovery.session_failed: $sessionDir: ${e.message}" }
+                            return@sessions
+                        }
+                    }
+                    } catch (e: Exception) {
+                        log(TAG, WARN) { "recovery.module_failed: $moduleDir: ${e.message}" }
+                        return@modules
                     }
                 }
             }
@@ -257,7 +283,7 @@ class StartupRecoveryService @Inject constructor(
                 && blobFile.fileSize() == ref.sizeBytes
                 && hasValidLiveBlobHash(ref, blobFile)
             if (!valid) {
-                log(TAG) { "recovery.live_blob_invalid: ${blobFile.parent}" }
+                log(TAG) { "recovery.blobref_removed: ${ref.blobId} (storageKey=${ref.storageKey}) — file invalid: ${blobFile.parent}" }
                 try {
                     blobFile.parent?.deleteRecursively()
                 } catch (e: Exception) {

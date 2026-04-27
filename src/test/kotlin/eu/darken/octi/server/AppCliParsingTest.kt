@@ -60,4 +60,20 @@ class AppCliParsingTest {
             App.parseConfig(baseArgs + "--min-free-disk-mb=$tooBig")
         }
     }
+
+    @Test
+    fun `--disable-rate-limits also disables the per-account limiter`() {
+        // Pre-fix: only `rateLimit` (the IP-based limiter) was nullified; AccountRateLimiter
+        // kept enforcing config.accountRateLimit. Now both are disabled by the same flag.
+        val cfg = App.parseConfig(baseArgs + "--disable-rate-limits")
+        cfg.rateLimit shouldBe null
+        cfg.accountRateLimit shouldBe 0
+    }
+
+    @Test
+    fun `without --disable-rate-limits accountRateLimit keeps its default`() {
+        val cfg = App.parseConfig(baseArgs)
+        // AccountRateLimiter.acquire treats <= 0 as disabled, so the default must be > 0.
+        (cfg.accountRateLimit > 0) shouldBe true
+    }
 }

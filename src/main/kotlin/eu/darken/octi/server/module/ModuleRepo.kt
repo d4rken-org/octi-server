@@ -623,6 +623,7 @@ class ModuleRepo @Inject constructor(
             BlobHandle(
                 stream = Files.newInputStream(blobFile),
                 sizeBytes = ref.sizeBytes,
+                modifiedAt = blobFile.getLastModifiedTime().toInstant(),
                 hashAlgorithm = ref.hashAlgorithm,
                 hashHex = ref.hashHex,
             )
@@ -725,6 +726,7 @@ internal data class ModuleAccounting(
 class BlobHandle(
     val stream: InputStream,
     val sizeBytes: Long,
+    val modifiedAt: Instant,
     val hashAlgorithm: String? = null,
     val hashHex: String? = null,
 ) : AutoCloseable {

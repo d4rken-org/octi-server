@@ -6,6 +6,10 @@ import io.kotest.matchers.shouldBe
 import io.ktor.client.call.*
 import io.ktor.client.request.*
 import io.ktor.http.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.Serializable
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.condition.EnabledOnOs
@@ -13,6 +17,7 @@ import org.junit.jupiter.api.condition.OS
 import java.security.MessageDigest
 import java.util.*
 import kotlin.io.path.exists
+import kotlin.io.path.fileSize
 
 /**
  * Probes the open-fd-after-unlink contract at the repo level. HTTP streaming is unreliable
@@ -118,5 +123,57 @@ class BlobConcurrencyTest : TestRunner() {
             Thread.sleep(100)
         }
         gone shouldBe true
+    }
+
+    @Test
+    fun `concurrent PATCH at same offset rejects exactly one writer`() = runTest2 {
+        // Pins the stale-meta race fix in UploadSessionRepo.appendToSession. Pre-fix,
+        // the second writer read pre-lock state.meta (offset still 0) and overwrote the
+        // first writer's bytes. After fix, the second writer re-reads under lock and
+        // sees the updated offset, returning 409 Conflict.
+        val creds = createDevice()
+        val payload = ByteArray(2048) { (it % 251).toByte() }
+        val hash = payload.sha256Hex()
+
+        val session = http.post("/v1/module/$moduleId/blob-sessions") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            contentType(ContentType.Application.Json)
+            setBody("""{"sizeBytes": ${payload.size}, "hashAlgorithm": "sha256", "hashHex": "$hash"}""")
+        }.body<SessionInfo>()
+
+        val statuses = coroutineScope {
+            listOf(
+                async(Dispatchers.IO) {
+                    http.patch("/v1/module/$moduleId/blob-sessions/${session.sessionId}") {
+                        url { parameters.append("device-id", creds.deviceId.toString()) }
+                        addCredentials(creds)
+                        header("Upload-Offset", "0")
+                        contentType(ContentType.Application.OctetStream)
+                        setBody(payload)
+                    }.status
+                },
+                async(Dispatchers.IO) {
+                    http.patch("/v1/module/$moduleId/blob-sessions/${session.sessionId}") {
+                        url { parameters.append("device-id", creds.deviceId.toString()) }
+                        addCredentials(creds)
+                        header("Upload-Offset", "0")
+                        contentType(ContentType.Application.OctetStream)
+                        setBody(payload)
+                    }.status
+                },
+            ).awaitAll()
+        }
+
+        // Order is non-deterministic — exactly one NoContent (204 successful append) and
+        // exactly one Conflict (409 OffsetMismatch from the second writer).
+        statuses.count { it == HttpStatusCode.NoContent } shouldBe 1
+        statuses.count { it == HttpStatusCode.Conflict } shouldBe 1
+
+        // Final part file must contain a single payload's worth of bytes, not double.
+        val moduleDir = getModulesPath(creds).resolve(moduleId.toModuleDirName())
+        val sessionDir = moduleDir.resolve("sessions").resolve(session.sessionId)
+        val partFile = sessionDir.resolve("payload.part")
+        partFile.fileSize() shouldBe payload.size.toLong()
     }
 }

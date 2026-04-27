@@ -195,9 +195,15 @@ class UploadSessionRepo @Inject constructor(
         if (!state.meta.matchesScopeWithDevice(accountId, deviceId, moduleId)) return AppendResult.SessionNotFound
 
         return state.lock.withLock {
-            val meta = state.meta
+            // Re-read current state under the lock — `state` was captured before lock
+            // acquisition and `state.meta` may be stale (a concurrent caller could have
+            // updated `sessions[sessionId] = state.copy(meta = newMeta)` while we waited).
+            // The `Mutex` is preserved by `data class.copy`, so the lock we hold is the
+            // right one; only the meta needs refreshing.
+            val current = sessions[sessionId] ?: return@withLock AppendResult.SessionNotFound
+            val meta = current.meta
             if (meta.isExpired()) {
-                terminateSessionLocked(state, "expired_on_append")
+                terminateSessionLocked(current, "expired_on_append")
                 return@withLock AppendResult.SessionNotActive("expired")
             }
             if (meta.state != UploadSessionMeta.State.ACTIVE) {
@@ -207,7 +213,7 @@ class UploadSessionRepo @Inject constructor(
                 return@withLock AppendResult.OffsetMismatch(meta.offsetBytes)
             }
 
-            val partFile = state.sessionDir.resolve(PART_FILENAME)
+            val partFile = current.sessionDir.resolve(PART_FILENAME)
             var bytesWritten = 0L
             val remaining = meta.expectedSizeBytes - meta.offsetBytes
 
@@ -239,8 +245,8 @@ class UploadSessionRepo @Inject constructor(
                 offsetBytes = newOffset,
                 lastActivityAt = Instant.now(),
             )
-            persistSessionMeta(state.sessionDir, updatedMeta)
-            sessions[sessionId] = state.copy(meta = updatedMeta)
+            persistSessionMeta(current.sessionDir, updatedMeta)
+            sessions[sessionId] = current.copy(meta = updatedMeta)
 
             log(TAG, VERBOSE) { "append: session=$sessionId, wrote=$bytesWritten, newOffset=$newOffset" }
             AppendResult.Success(newOffset)
@@ -259,10 +265,13 @@ class UploadSessionRepo @Inject constructor(
         if (!state.meta.matchesScopeWithDevice(accountId, deviceId, moduleId)) return FinalizeResult.SessionNotFound
 
         return state.lock.withLock {
-            val meta = state.meta
+            // Re-read current state under the lock so we observe any meta updates that
+            // raced us to the lock. The Mutex itself is preserved by data class copy.
+            val current = sessions[sessionId] ?: return@withLock FinalizeResult.SessionNotFound
+            val meta = current.meta
 
             if (meta.isExpired()) {
-                terminateSessionLocked(state, "expired_on_finalize")
+                terminateSessionLocked(current, "expired_on_finalize")
                 return@withLock FinalizeResult.SessionNotFound
             }
 
@@ -288,8 +297,15 @@ class UploadSessionRepo @Inject constructor(
             if (effectiveHex == null) {
                 return@withLock FinalizeResult.MissingChecksum
             }
+            // Defensive: hashHex without hashAlgorithm produces a session shape that
+            // recovery rejects on next restart (StartupRecoveryService.hasValidCompleteHash
+            // requires non-null algorithm). Reject here too in case a pre-fix session
+            // persisted that combo on disk and is now finalizing.
+            if (effectiveAlgorithm == null) {
+                return@withLock FinalizeResult.MissingChecksum
+            }
 
-            val partFile = state.sessionDir.resolve(PART_FILENAME)
+            val partFile = current.sessionDir.resolve(PART_FILENAME)
             if (!partFile.exists()) return@withLock FinalizeResult.ChecksumMismatch
             val actualHash = computeSha256(partFile)
             if (actualHash != effectiveHex) {
@@ -298,7 +314,7 @@ class UploadSessionRepo @Inject constructor(
             }
 
             // Rename payload.part to payload.blob (stays in sessions/ until commit)
-            val blobFile = state.sessionDir.resolve(BLOB_FILENAME)
+            val blobFile = current.sessionDir.resolve(BLOB_FILENAME)
             if (partFile.exists()) {
                 partFile.moveTo(blobFile, overwrite = true)
             }
@@ -313,8 +329,8 @@ class UploadSessionRepo @Inject constructor(
                 hashHex = effectiveHex,
                 lastActivityAt = Instant.now(),
             )
-            persistSessionMeta(state.sessionDir, updatedMeta)
-            sessions[sessionId] = state.copy(meta = updatedMeta)
+            persistSessionMeta(current.sessionDir, updatedMeta)
+            sessions[sessionId] = current.copy(meta = updatedMeta)
 
             log(TAG) { "finalize: session=$sessionId complete, blob=${meta.blobId}" }
             FinalizeResult.Success(meta.blobId, meta.expectedSizeBytes)
@@ -343,7 +359,16 @@ class UploadSessionRepo @Inject constructor(
 
     private fun terminateSessionLocked(state: SessionState, reason: String): UploadSessionMeta {
         val meta = state.meta
-        sessions.remove(meta.sessionId)
+        // Idempotent: another path (GC vs in-flight call) may have already terminated this
+        // session under the same lock. Both paths share the same `Mutex` (data class copy
+        // preserves it), so the second caller sees an already-removed map entry here.
+        if (sessions.remove(meta.sessionId) == null) return meta
+        // Skip releaseReservation when the staged payload is already gone — that means a
+        // successful commit already moved the file out via consumeAndMoveCompletedBlob, and
+        // commitReservation in the storage tracker is responsible for the reserved→used
+        // transition. Releasing here would double-debit reservedBytes.
+        val stagedExists = state.sessionDir.resolve(BLOB_FILENAME).exists() ||
+            state.sessionDir.resolve(PART_FILENAME).exists()
         try {
             state.sessionDir.deleteRecursively()
         } catch (e: Exception) {
@@ -354,7 +379,7 @@ class UploadSessionRepo @Inject constructor(
         // attacker spamming sessions for distinct moduleIds would leave behind one empty
         // module dir per session and pile up dirents.
         cleanupEmptyParentsAfterSession(state.sessionDir)
-        if (meta.expectedSizeBytes > 0 && meta.state != UploadSessionMeta.State.ABORTED) {
+        if (stagedExists && meta.expectedSizeBytes > 0 && meta.state != UploadSessionMeta.State.ABORTED) {
             storageTracker.releaseReservation(meta.accountId, meta.expectedSizeBytes)
         }
         log(TAG) { "terminateSession(${meta.sessionId}): $reason" }
@@ -456,20 +481,61 @@ class UploadSessionRepo @Inject constructor(
             ?: return ConsumeResult.SessionNotFound
 
         return state.lock.withLock {
-            // Re-validate after acquiring the lock — GC may have terminated this session
-            // between the lookup and the lock acquisition.
-            if (sessions[state.meta.sessionId] == null) return@withLock ConsumeResult.SessionNotFound
-            if (state.meta.state != UploadSessionMeta.State.COMPLETE) return@withLock ConsumeResult.SessionNotFound
-            if (state.meta.isExpired()) return@withLock ConsumeResult.SessionNotFound
+            // Re-read current under the lock — `state.meta` was captured before lock
+            // acquisition. Also re-validates against GC racing in between.
+            val current = sessions[state.meta.sessionId] ?: return@withLock ConsumeResult.SessionNotFound
+            if (current.meta.state != UploadSessionMeta.State.COMPLETE) return@withLock ConsumeResult.SessionNotFound
+            if (current.meta.isExpired()) return@withLock ConsumeResult.SessionNotFound
 
-            val blobFile = state.sessionDir.resolve(BLOB_FILENAME)
+            val blobFile = current.sessionDir.resolve(BLOB_FILENAME)
             if (!blobFile.exists()) return@withLock ConsumeResult.PayloadMissing
 
-            val destPath = destinationFor(state.meta)
+            val destPath = destinationFor(current.meta)
             destPath.parent.createDirectories()
             blobFile.moveTo(destPath, overwrite = true)
-            ConsumeResult.Ready(meta = state.meta)
+            // The session entry stays in the map; commitModule's removeCommittedSessionByBlobId
+            // cleans it up after the module.json rename. terminateSessionLocked sees the empty
+            // session dir (staged file is gone) and skips releaseReservation — commitReservation
+            // owns the reserved→used transition.
+            ConsumeResult.Ready(meta = current.meta)
         }
+    }
+
+    /**
+     * Validates that a COMPLETE upload session for [blobId] exists, is scoped correctly,
+     * and has its staged payload on disk. Used by commit's pre-validation pass to fail
+     * fast before any blob is moved (see ModuleLifecycleService.commitModule). Does not
+     * mutate state. TOCTOU: a GC reaper or abort can still terminate the session between
+     * peek and the subsequent consumeAndMoveCompletedBlob call — the commit path must
+     * still handle that failure with a rollback.
+     */
+    suspend fun peekCompletedBlob(
+        blobId: String,
+        accountId: AccountId,
+        deviceId: DeviceId,
+        moduleId: ModuleId,
+    ): PeekResult {
+        val state = sessions.values
+            .firstOrNull {
+                it.meta.blobId == blobId
+                    && it.meta.state == UploadSessionMeta.State.COMPLETE
+                    && it.meta.matchesScopeWithDevice(accountId, deviceId, moduleId)
+            }
+            ?: return PeekResult.NotFound
+
+        return state.lock.withLock {
+            val current = sessions[state.meta.sessionId] ?: return@withLock PeekResult.NotFound
+            if (current.meta.state != UploadSessionMeta.State.COMPLETE) return@withLock PeekResult.NotFound
+            if (current.meta.isExpired()) return@withLock PeekResult.NotFound
+            if (!current.sessionDir.resolve(BLOB_FILENAME).exists()) return@withLock PeekResult.PayloadMissing
+            PeekResult.Ready
+        }
+    }
+
+    sealed interface PeekResult {
+        data object Ready : PeekResult
+        data object NotFound : PeekResult
+        data object PayloadMissing : PeekResult
     }
 
     fun removeCommittedSessionByBlobId(blobId: String) {

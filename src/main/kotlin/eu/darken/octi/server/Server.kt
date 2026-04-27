@@ -32,7 +32,6 @@ import io.ktor.server.plugins.autohead.*
 // ConditionalHeaders not used globally — see comment in server setup
 import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.plugins.*
-import io.ktor.server.plugins.partialcontent.*
 import io.ktor.server.plugins.statuspages.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
@@ -64,7 +63,11 @@ class Server @Inject constructor(
         embeddedServer(Netty, config.port) {
             installCallLogging(config.trustedProxyIps)
             install(AutoHeadResponse)
-            install(PartialContent)
+            // PartialContent is NOT installed globally — BlobRoute.downloadBlob handles
+            // Range / If-Range / Last-Modified manually because BlobHandle wraps an
+            // already-open InputStream (POSIX inode-survival across concurrent commit
+            // orphan-deletes). LocalFileContent + PartialContent would re-open at
+            // response time, breaking that invariant.
             // ConditionalHeaders is NOT installed globally — the module commit path
             // handles If-Match/If-None-Match explicitly for optimistic concurrency control.
             // Installing it globally would cause Ktor to intercept these headers before

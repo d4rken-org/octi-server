@@ -58,6 +58,11 @@ class AccountRateLimiter @Inject constructor(
     }
 
     fun acquire(accountId: AccountId): Decision {
+        // Disabled when limit <= 0. App.Config sets accountRateLimit = 0 when
+        // --disable-rate-limits is passed, so both this and the IP-based limiter share
+        // a single CLI off switch. A misconfig (negative or zero) also disables here
+        // rather than blackholing all authenticated traffic.
+        if (limit <= 0) return Decision.Accepted
         val now = Instant.now()
         var decision: Decision = Decision.Accepted
         buckets.compute(accountId) { _, existing ->

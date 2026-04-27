@@ -412,4 +412,26 @@ class StartupRecoveryServiceTest : TestRunner() {
             component.storageTracker().getUsage(accountId).reservedBytes shouldBe 0
         }
     }
+
+    @Test
+    fun `document_size_normalized rebuilds usedBytes from actual payload size`() {
+        // Crash mid-document-write before module.json rename: meta says 100 but the
+        // payload.blob on disk is only 50 bytes. Plan §"Startup Recovery" item 4.
+        val accountId = UUID.randomUUID()
+        val deviceId = UUID.randomUUID()
+        val moduleId = "eu.darken.octi.recovery.docsize"
+
+        runTest2(seed = { cfg ->
+            BlobFixtures.seedAccountDevice(cfg.dataPath, accountId, deviceId)
+            val moduleDir = BlobFixtures.moduleDir(cfg.dataPath, accountId, deviceId, moduleId)
+            BlobFixtures.writeModuleMeta(
+                moduleDir,
+                BlobFixtures.moduleMeta(moduleId, deviceId, documentSizeBytes = 100),
+            )
+            BlobFixtures.writeModulePayloadBlob(moduleDir, ByteArray(50))
+        }) {
+            // Recovery should normalize documentSizeBytes to 50, not 100.
+            component.storageTracker().getUsage(accountId).usedBytes shouldBe 50
+        }
+    }
 }

@@ -1047,4 +1047,45 @@ class BlobFlowTest : TestRunner() {
             body<FinalizeInfo>().state shouldBe "complete"
         }
     }
+
+    @Test
+    fun `createSession rejects hashHex without hashAlgorithm`() = runTest2 {
+        val creds = createDevice()
+        writeModule(creds, testModuleId, data = "init")
+
+        http.post("/v1/module/$testModuleId/blob-sessions") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            contentType(ContentType.Application.Json)
+            setBody("""{"sizeBytes": 1024, "hashHex": "${"a".repeat(64)}"}""")
+        }.status shouldBe HttpStatusCode.BadRequest
+    }
+
+    @Test
+    fun `finalize rejects hashHex without hashAlgorithm`() = runTest2 {
+        val creds = createDevice()
+        writeModule(creds, testModuleId, data = "init")
+
+        val session = http.post("/v1/module/$testModuleId/blob-sessions") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            contentType(ContentType.Application.Json)
+            setBody("""{"sizeBytes": 4}""")
+        }.body<SessionInfo>()
+
+        http.patch("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header("Upload-Offset", "0")
+            contentType(ContentType.Application.OctetStream)
+            setBody(ByteArray(4))
+        }
+
+        http.post("/v1/module/$testModuleId/blob-sessions/${session.sessionId}/finalize") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            contentType(ContentType.Application.Json)
+            setBody("""{"hashHex": "${"a".repeat(64)}"}""")
+        }.status shouldBe HttpStatusCode.BadRequest
+    }
 }

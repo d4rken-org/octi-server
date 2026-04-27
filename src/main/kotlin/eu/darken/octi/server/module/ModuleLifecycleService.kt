@@ -115,6 +115,9 @@ class ModuleLifecycleService @Inject constructor(
         target: Device,
         moduleId: ModuleId,
     ) {
+        // Abort sessions first so terminateSessionLocked sees the staged files and
+        // releases reservations before deleteUnlocked wipes the module dir.
+        sessionRepo.abortSessionsForModule(caller.accountId, target.id, moduleId)
         target.sync.withLock {
             val oldMeta = moduleRepo.loadMeta(target, moduleId)
             if (oldMeta != null) {
@@ -126,8 +129,6 @@ class ModuleLifecycleService @Inject constructor(
             } else {
                 moduleRepo.deleteUnlocked(target, moduleId)
             }
-
-            sessionRepo.abortSessionsForModule(caller.accountId, target.id, moduleId)
         }
     }
 
@@ -235,41 +236,80 @@ class ModuleLifecycleService @Inject constructor(
                     if (!exists()) createDirectory()
                 }
 
-                // Resolve blob refs. The staged payload move is done atomically inside the
-                // session lock by consumeAndMoveCompletedBlob — see its docstring for the race
-                // it closes (GC reaping the session between lookup and move).
-                val newBlobRefs = mutableListOf<BlobRef>()
+                // Pass 1 — pre-validate all blobIds before any move. Fail-fast on the easy
+                // invalid-ref case so we don't have to roll back partial moves later.
                 for (blobId in blobRefIds) {
-                    val existingRef = existingMeta?.blobRefs?.find { it.blobId == blobId }
-                    if (existingRef != null) {
-                        newBlobRefs.add(existingRef)
-                        continue
-                    }
-                    val consumed = sessionRepo.consumeAndMoveCompletedBlob(
+                    if (existingMeta?.blobRefs?.any { it.blobId == blobId } == true) continue
+                    when (sessionRepo.peekCompletedBlob(
                         blobId = blobId,
                         accountId = caller.accountId,
                         deviceId = target.id,
                         moduleId = moduleId,
-                    ) { meta ->
-                        val prefix = meta.storageKey.take(4)
-                        modulePath.resolve("blobs").resolve(prefix).resolve(meta.storageKey).resolve("payload.blob")
-                    }
-                    val sessionMeta = when (consumed) {
-                        is UploadSessionRepo.ConsumeResult.Ready -> consumed.meta
-                        UploadSessionRepo.ConsumeResult.SessionNotFound ->
+                    )) {
+                        UploadSessionRepo.PeekResult.Ready -> Unit
+                        UploadSessionRepo.PeekResult.NotFound ->
                             return@withLock CommitResult.BadRequest("Referenced blobId not found: $blobId") to emptyList<Path>()
-                        UploadSessionRepo.ConsumeResult.PayloadMissing ->
+                        UploadSessionRepo.PeekResult.PayloadMissing ->
                             return@withLock CommitResult.BadRequest("Staged blob payload missing for $blobId") to emptyList<Path>()
                     }
-                    newBlobRefs.add(
-                        BlobRef(
-                            blobId = sessionMeta.blobId,
-                            storageKey = sessionMeta.storageKey,
-                            sizeBytes = sessionMeta.expectedSizeBytes,
-                            hashAlgorithm = sessionMeta.hashAlgorithm,
-                            hashHex = sessionMeta.hashHex,
+                }
+
+                // Pass 2 — move staged blobs into live storage. peek+consume is TOCTOU
+                // (GC can terminate a peeked session before consume runs); on any failure
+                // here, roll back already-moved blobs by deleting their storageKey dirs.
+                val newBlobRefs = mutableListOf<BlobRef>()
+                val movedDestPaths = mutableListOf<Path>()
+                fun rollbackMoves() {
+                    movedDestPaths.forEach { dest ->
+                        runCatching { dest.parent?.deleteRecursively() }
+                    }
+                }
+                try {
+                    for (blobId in blobRefIds) {
+                        val existingRef = existingMeta?.blobRefs?.find { it.blobId == blobId }
+                        if (existingRef != null) {
+                            newBlobRefs.add(existingRef)
+                            continue
+                        }
+                        var capturedDest: Path? = null
+                        val consumed = sessionRepo.consumeAndMoveCompletedBlob(
+                            blobId = blobId,
+                            accountId = caller.accountId,
+                            deviceId = target.id,
+                            moduleId = moduleId,
+                        ) { meta ->
+                            val prefix = meta.storageKey.take(4)
+                            val destPath = modulePath.resolve("blobs").resolve(prefix).resolve(meta.storageKey).resolve("payload.blob")
+                            capturedDest = destPath
+                            destPath
+                        }
+                        val sessionMeta = when (consumed) {
+                            is UploadSessionRepo.ConsumeResult.Ready -> {
+                                capturedDest?.let { movedDestPaths.add(it) }
+                                consumed.meta
+                            }
+                            UploadSessionRepo.ConsumeResult.SessionNotFound -> {
+                                rollbackMoves()
+                                return@withLock CommitResult.BadRequest("Referenced blobId not found: $blobId") to emptyList<Path>()
+                            }
+                            UploadSessionRepo.ConsumeResult.PayloadMissing -> {
+                                rollbackMoves()
+                                return@withLock CommitResult.BadRequest("Staged blob payload missing for $blobId") to emptyList<Path>()
+                            }
+                        }
+                        newBlobRefs.add(
+                            BlobRef(
+                                blobId = sessionMeta.blobId,
+                                storageKey = sessionMeta.storageKey,
+                                sizeBytes = sessionMeta.expectedSizeBytes,
+                                hashAlgorithm = sessionMeta.hashAlgorithm,
+                                hashHex = sessionMeta.hashHex,
+                            )
                         )
-                    )
+                    }
+                } catch (e: Exception) {
+                    rollbackMoves()
+                    throw e
                 }
 
                 // Write payload.blob first, then module.json as commit point
@@ -368,6 +408,11 @@ class ModuleLifecycleService @Inject constructor(
      * `module.json` is malformed or missing — recovery's payload.blob fallback applies here too.
      */
     suspend fun deleteForDevice(accountId: AccountId, target: Device) {
+        // Abort sessions first so terminateSessionLocked sees the staged files
+        // (payload.part / payload.blob) and releases their reservations. clearUnlocked
+        // below wipes the entire modules dir including sessions/, so a post-clear abort
+        // would find empty session dirs and skip releaseReservation.
+        sessionRepo.abortSessionsForDevice(accountId, target.id)
         target.sync.withLock {
             val modulesPath = target.path.resolve("modules")
             val totalBytes = if (modulesPath.exists()) {
@@ -376,7 +421,6 @@ class ModuleLifecycleService @Inject constructor(
             moduleRepo.clearUnlocked(target)
             if (totalBytes > 0) storageTracker.adjustUsed(accountId, -totalBytes)
         }
-        sessionRepo.abortSessionsForDevice(accountId, target.id)
     }
 
     /**

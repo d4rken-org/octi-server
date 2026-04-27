@@ -18,6 +18,10 @@ import io.ktor.server.routing.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
+import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -159,8 +163,12 @@ class BlobRoute @Inject constructor(
             moduleRepo.touchAccess(target, moduleId)
 
             val etag = strongEtagFor(handle, blobId)
+            // Truncate to seconds so the wire-format date round-trips equality with itself
+            // when the client echoes it back via If-Range / If-Modified-Since.
+            val lastModified = handle.modifiedAt.truncatedTo(ChronoUnit.SECONDS)
             call.response.header(HttpHeaders.AcceptRanges, "bytes")
             call.response.header(HttpHeaders.ETag, "\"$etag\"")
+            call.response.header(HttpHeaders.LastModified, RFC1123_FORMATTER.format(lastModified.atOffset(ZoneOffset.UTC)))
 
             // If-None-Match short-circuits the body — the client already has a matching copy.
             val ifNoneMatch = call.request.headers[HttpHeaders.IfNoneMatch]?.let { parseStrongEtag(it) }
@@ -169,7 +177,23 @@ class BlobRoute @Inject constructor(
                 return
             }
 
-            val rangeRequest = call.request.headers[HttpHeaders.Range]
+            // RFC 7233 §3.2: If-Range may be either an entity-tag or an HTTP-date.
+            // If it doesn't match the current resource, fall back to a full 200 (don't honor
+            // the Range). Malformed If-Range is treated the same way — never reject with 400.
+            val ifRangeRaw = call.request.headers[HttpHeaders.IfRange]
+            val ifRangeMatches = when {
+                ifRangeRaw == null -> true
+                else -> {
+                    val asEtag = parseStrongEtag(ifRangeRaw)
+                    if (asEtag != null && asEtag != "*") {
+                        asEtag == etag
+                    } else {
+                        val asDate = runCatching { RFC1123_FORMATTER.parse(ifRangeRaw, java.time.OffsetDateTime::from).toInstant() }.getOrNull()
+                        asDate != null && asDate == lastModified
+                    }
+                }
+            }
+            val rangeRequest = call.request.headers[HttpHeaders.Range]?.takeIf { ifRangeMatches }
             val range = if (rangeRequest != null) parseSingleByteRange(rangeRequest, handle.sizeBytes) else null
             when (range) {
                 is RangeParse.Unsatisfiable -> {
@@ -368,6 +392,13 @@ class BlobRoute @Inject constructor(
         }
         if (request.hashHex != null && !SHA256_HEX_REGEX.matches(request.hashHex)) {
             call.respond(HttpStatusCode.BadRequest, "hashHex must be exactly 64 lowercase hex characters")
+            return
+        }
+        // hashHex without hashAlgorithm produces a session whose persisted shape is
+        // rejected by StartupRecoveryService.hasValidCompleteHash on next restart —
+        // the valid blob would be deleted. Either both fields are present, or neither.
+        if (request.hashHex != null && request.hashAlgorithm == null) {
+            call.respond(HttpStatusCode.BadRequest, "hashAlgorithm is required when hashHex is provided")
             return
         }
 
@@ -574,6 +605,13 @@ class BlobRoute @Inject constructor(
             call.respond(HttpStatusCode.BadRequest, "hashHex must be exactly 64 lowercase hex characters")
             return
         }
+        // hashHex without hashAlgorithm produces a session whose persisted shape is
+        // rejected by StartupRecoveryService.hasValidCompleteHash on next restart —
+        // the valid blob would be deleted. Either both fields are present, or neither.
+        if (request.hashHex != null && request.hashAlgorithm == null) {
+            call.respond(HttpStatusCode.BadRequest, "hashAlgorithm is required when hashHex is provided")
+            return
+        }
 
         val result = sessionRepo.finalizeSession(
             sessionId = sessionId,
@@ -632,6 +670,8 @@ class BlobRoute @Inject constructor(
 
     companion object {
         private val SHA256_HEX_REGEX = "^[0-9a-f]{64}$".toRegex()
+        private val RFC1123_FORMATTER: DateTimeFormatter =
+            DateTimeFormatter.RFC_1123_DATE_TIME.withLocale(Locale.US).withZone(ZoneOffset.UTC)
         private val TAG = logTag("Blob", "Route")
     }
 }

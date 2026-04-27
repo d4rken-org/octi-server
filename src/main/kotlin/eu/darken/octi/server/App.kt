@@ -92,6 +92,7 @@ class App @Inject constructor(
                 dataPath = Path("/tmp/placeholder"),
             )
 
+            val rateLimitsDisabled = args.any { it.startsWith("--disable-rate-limits") }
             return Config(
                 isDebug = args.any { it.startsWith("--debug") },
                 port = parseIntFlag(args, "--port", min = 1, max = 65535) ?: 8080,
@@ -99,7 +100,7 @@ class App @Inject constructor(
                     .single { it.startsWith("--datapath=") }
                     .let { Path(it.substringAfter('=')) }
                     .absolute(),
-                rateLimit = if (args.any { it.startsWith("--disable-rate-limits") }) {
+                rateLimit = if (rateLimitsDisabled) {
                     null
                 } else {
                     RateLimitConfig(
@@ -137,8 +138,8 @@ class App @Inject constructor(
                     ?: defaults.maxModulesPerDevice,
                 maxBlobRefsPerModule = parseIntFlag(args, "--max-blob-refs-per-module", min = 1)
                     ?: defaults.maxBlobRefsPerModule,
-                accountRateLimit = parseIntFlag(args, "--account-rate-limit", min = 1)
-                    ?: defaults.accountRateLimit,
+                accountRateLimit = if (rateLimitsDisabled) 0
+                    else parseIntFlag(args, "--account-rate-limit", min = 1) ?: defaults.accountRateLimit,
                 accountRateLimitWindowSeconds = parseLongFlag(args, "--account-rate-limit-window-seconds", min = 1)
                     ?: defaults.accountRateLimitWindowSeconds,
                 trustedProxyIps = parseTrustedProxyIps(args) ?: defaults.trustedProxyIps,
