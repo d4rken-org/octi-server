@@ -104,6 +104,11 @@ class BlobRoute @Inject constructor(
             delete("/blobs/{blobId}") { deleteBlob() }
 
             post("/blob-sessions") { createSession() }
+            // Plan §"Resumable Upload Sessions" specifies HEAD /blob-sessions/{id}.
+            // Registered as GET so Ktor's AutoHeadResponse plugin (installed in Server.kt)
+            // can synthesize HEAD from the GET handler — installing an explicit `head { }`
+            // route is shadowed by AutoHeadResponse's HEAD→GET method swap. Both verbs
+            // therefore reach this handler; clients should use HEAD per the contract.
             get("/blob-sessions/{sessionId}") { sessionStatus() }
 
             // PATCH gets a larger body limit for blob chunks
@@ -170,9 +175,11 @@ class BlobRoute @Inject constructor(
             call.response.header(HttpHeaders.ETag, "\"$etag\"")
             call.response.header(HttpHeaders.LastModified, RFC1123_FORMATTER.format(lastModified.atOffset(ZoneOffset.UTC)))
 
-            // If-None-Match short-circuits the body — the client already has a matching copy.
+            // If-None-Match short-circuits the body. RFC 7232 §3.2: `*` matches if the
+            // resource exists (we already opened the handle, so it does); a strong ETag
+            // matches by string equality.
             val ifNoneMatch = call.request.headers[HttpHeaders.IfNoneMatch]?.let { parseStrongEtag(it) }
-            if (ifNoneMatch != null && ifNoneMatch == etag) {
+            if (ifNoneMatch == "*" || (ifNoneMatch != null && ifNoneMatch == etag)) {
                 call.respond(HttpStatusCode.NotModified)
                 return
             }
@@ -338,10 +345,9 @@ class BlobRoute @Inject constructor(
             call.respond(HttpStatusCode.BadRequest, "Malformed If-Match header")
             return
         }
-        if (ifMatch == "*") {
-            call.respond(HttpStatusCode.BadRequest, "Wildcard If-Match not supported on blob delete")
-            return
-        }
+        // RFC 7232 §3.1: `If-Match: *` means "if the resource currently exists".
+        // For blob delete this is the standard "delete if exists" idiom — pass through;
+        // moduleRepo.removeBlobRefUnlocked treats `*` as match-any-etag.
 
         when (val result = lifecycleService.deleteBlob(caller, target, moduleId, blobId, ifMatch)) {
             is ModuleLifecycleService.DeleteBlobResult.ModuleNotFound ->
@@ -559,7 +565,10 @@ class BlobRoute @Inject constructor(
             moduleId = moduleId,
             requestOffset = requestOffset,
             channel = channel,
-            maxChunkBytes = config.maxBlobPatchBytes,
+            // Tighter of the two bounds — the chunk-size cap and the remaining declared
+            // bytes for the session. Defense-in-depth alongside the existing `> remaining`
+            // check inside the write loop.
+            maxChunkBytes = incomingUpperBound,
         )
 
         when (result) {

@@ -440,6 +440,10 @@ class UploadSessionRepo @Inject constructor(
         for (state in toAbort) {
             terminateSession(state.meta.sessionId, "account_deleted")
         }
+        // Drop the per-account creation lock now that the account is gone — otherwise
+        // accountLocks would grow unbounded over the server's lifetime as accounts are
+        // created and deleted (computeIfAbsent never removes entries).
+        accountLocks.remove(accountId)
     }
 
     // endregion

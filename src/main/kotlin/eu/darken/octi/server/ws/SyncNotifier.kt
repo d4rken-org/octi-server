@@ -41,7 +41,9 @@ class SyncNotifier @Inject constructor(
                 val moduleId: String,
                 val modifiedAt: String,
                 val action: String,
-                val sourceDeviceId: String? = null,
+                // Mandatory per plan §"Notification Semantics During Mixed Operation".
+                // Used for self-suppression (filters on actor identity, not target).
+                val sourceDeviceId: String,
             ) : Event
         }
     }
@@ -112,9 +114,9 @@ class SyncNotifier @Inject constructor(
                 val relevantEvents = broadcast.events.filter { event ->
                     when (event) {
                         is EventPayload.Event.ModuleChanged -> {
-                            // Self-suppression: filter on sourceDeviceId (the actor), not deviceId (the target)
-                            val source = event.sourceDeviceId ?: event.deviceId
-                            source != peerDeviceIdStr
+                            // Self-suppression: filter on sourceDeviceId (the actor), not deviceId (the target).
+                            // sourceDeviceId is mandatory per the data class — no fallback needed.
+                            event.sourceDeviceId != peerDeviceIdStr
                         }
                     }
                 }

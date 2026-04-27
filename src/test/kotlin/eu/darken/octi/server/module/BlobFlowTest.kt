@@ -86,7 +86,7 @@ class BlobFlowTest : TestRunner() {
             setBody("""{"sizeBytes": 100}""")
         }.body<SessionInfo>()
 
-        http.get("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+        http.head("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
             url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
         }.apply {
@@ -110,7 +110,7 @@ class BlobFlowTest : TestRunner() {
             setBody("""{"sizeBytes": 1}""")
         }.body<SessionInfo>()
 
-        http.get("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+        http.head("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
             addCredentials(creds)
         }.status shouldBe HttpStatusCode.BadRequest
 
@@ -378,7 +378,7 @@ class BlobFlowTest : TestRunner() {
         }
 
         // Session should no longer exist
-        http.get("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+        http.head("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
             url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
         }.apply {
@@ -637,7 +637,7 @@ class BlobFlowTest : TestRunner() {
         }.body<SessionInfo>()
 
         // Bob tries to read session status — must fail (scope mismatch via accountId)
-        http.get("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+        http.head("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
             url { parameters.append("device-id", alice.deviceId.toString()) }
             addCredentials(bob)
         }.status shouldBe HttpStatusCode.NotFound
@@ -876,7 +876,9 @@ class BlobFlowTest : TestRunner() {
     }
 
     @Test
-    fun `delete blob with wildcard If-Match returns 400`() = runTest2 {
+    fun `delete blob with wildcard If-Match succeeds when blob exists`() = runTest2 {
+        // RFC 7232 §3.1: `If-Match: *` means "if the resource currently exists" — the
+        // standard delete-if-exists idiom. Pre-fix this returned 400; now it succeeds.
         val creds = createDevice()
         val moduleEtag1 = createModule(creds, testModuleId)
         val (blobId, _) = commitBlob(creds, testModuleId, "wildcard".toByteArray(), moduleEtag1)
@@ -885,7 +887,7 @@ class BlobFlowTest : TestRunner() {
             url { parameters.append("device-id", creds.deviceId.toString()) }
             addCredentials(creds)
             header("If-Match", "*")
-        }.status shouldBe HttpStatusCode.BadRequest
+        }.status shouldBe HttpStatusCode.OK
     }
 
     @Test

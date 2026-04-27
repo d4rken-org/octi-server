@@ -551,7 +551,10 @@ class ModuleRepo @Inject constructor(
         val oldMeta = loadOrMigrateMeta(modulePath, moduleId)
             ?: return RemoveBlobRefResult.ModuleNotFound
 
-        if (oldMeta.etag != ifMatch) {
+        // RFC 7232 §3.1 wildcard: `*` matches any current entity, used as an
+        // unconditional-delete-if-exists guard. Existence is implicit because we already
+        // loaded the module above.
+        if (ifMatch != "*" && oldMeta.etag != ifMatch) {
             return RemoveBlobRefResult.EtagMismatch(currentEtag = oldMeta.etag)
         }
 
