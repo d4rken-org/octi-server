@@ -93,6 +93,11 @@ class DeviceRoute @Inject constructor(
             return
         }
 
+        // Order is significant: lifecycleService.deleteForDevice aborts sessions and
+        // releases their reservations BEFORE clearing modules off disk (see Tier A
+        // reorder of deleteForDevice). DeviceRepo.deleteDevice then nukes the whole
+        // device dir under target.sync, so any in-flight request that landed between
+        // the two calls has its write erased — no orphan data, no leaked reservation.
         lifecycleService.deleteForDevice(callerDevice.accountId, targetDevice)
         deviceRepo.deleteDevice(targetKey)
 

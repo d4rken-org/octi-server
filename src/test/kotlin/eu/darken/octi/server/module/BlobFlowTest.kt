@@ -1090,4 +1090,39 @@ class BlobFlowTest : TestRunner() {
             setBody("""{"hashHex": "${"a".repeat(64)}"}""")
         }.status shouldBe HttpStatusCode.BadRequest
     }
+
+    @Test
+    fun `PATCH chunk between global payloadLimit and per-route maxBlobPatchBytes`() = runTest2(
+        // Global request body limit (128 KB) intentionally smaller than the per-route
+        // RequestBodyLimit on /blob-sessions/{id} PATCH (1 MB). Send 256 KB and observe
+        // what wins. Pre-fix Codex claim: child plugin doesn't override parent → 413.
+        appConfig = baseConfig.copy(
+            payloadLimit = 128L * 1024,
+            maxBlobPatchBytes = 1024L * 1024,
+        ),
+    ) {
+        val creds = createDevice()
+        writeModule(creds, testModuleId, data = "init")
+
+        val payload = ByteArray(256 * 1024) { (it % 251).toByte() }
+        val session = http.post("/v1/module/$testModuleId/blob-sessions") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            contentType(ContentType.Application.Json)
+            setBody("""{"sizeBytes": ${payload.size}}""")
+        }.body<SessionInfo>()
+
+        val resp = http.patch("/v1/module/$testModuleId/blob-sessions/${session.sessionId}") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            header("Upload-Offset", "0")
+            contentType(ContentType.Application.OctetStream)
+            setBody(payload)
+        }
+        // Expectation: per-route limit (1 MB) wins → 204 NoContent. If we see 413, the
+        // global 128 KB limit caps the route despite the per-route override — that
+        // means Codex's claim is correct and the global limit needs to be installed
+        // path-aware instead.
+        resp.status shouldBe HttpStatusCode.NoContent
+    }
 }

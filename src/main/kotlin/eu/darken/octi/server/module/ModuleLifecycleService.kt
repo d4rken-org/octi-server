@@ -182,6 +182,15 @@ class ModuleLifecycleService @Inject constructor(
     /**
      * New PUT commit — under device lock, validates preconditions, resolves blobs,
      * writes atomically, adjusts quota, cleans up sessions and orphaned blobs.
+     *
+     * Lock-order deviation from PLAN-BLOB-SUPPORT.md §"Concurrency And Locking":
+     * the plan prescribes session lock → module lock; this method enters the device
+     * (module) lock first and then calls into [UploadSessionRepo.consumeAndMoveCompletedBlob]
+     * which acquires the per-session lock inside. No deadlock today because no other
+     * code path takes the reverse order (PATCH/finalize never re-enter the module lock).
+     * If the deferred per-module lifecycle flag from §"Implementation Deferrals" is later
+     * implemented and lets readers run concurrently with commits, the inversion needs to
+     * be resolved by moving session resolution outside the module lock.
      */
     suspend fun commitModule(
         caller: Device,
