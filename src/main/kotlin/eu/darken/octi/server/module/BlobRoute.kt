@@ -464,6 +464,10 @@ class BlobRoute @Inject constructor(
             is CreateSessionOutcome.Failed -> throw outcome.error
             is CreateSessionOutcome.Created -> {
                 val session = outcome.session
+                // Plan §"Module Expiration Protection": session creation counts as module
+                // activity and updates lastAccessedAt so module GC won't reap a fresh
+                // upload mid-flight.
+                moduleRepo.touchAccess(target, moduleId)
                 call.respond(
                     HttpStatusCode.Created,
                     SessionResponse(
@@ -573,6 +577,8 @@ class BlobRoute @Inject constructor(
 
         when (result) {
             is UploadSessionRepo.AppendResult.Success -> {
+                // Plan §"Module Expiration Protection": PATCH counts as module activity.
+                moduleRepo.touchAccess(target, moduleId)
                 call.response.header("Upload-Offset", result.newOffset.toString())
                 call.respond(HttpStatusCode.NoContent)
             }
@@ -633,9 +639,12 @@ class BlobRoute @Inject constructor(
 
         when (result) {
             is UploadSessionRepo.FinalizeResult.Success -> {
+                // Plan §"Module Expiration Protection": finalize counts as module activity.
+                moduleRepo.touchAccess(target, moduleId)
                 call.respond(FinalizeResponse(blobId = result.blobId, sessionId = sessionId, sizeBytes = result.sizeBytes, state = "complete"))
             }
             is UploadSessionRepo.FinalizeResult.AlreadyComplete -> {
+                moduleRepo.touchAccess(target, moduleId)
                 call.respond(FinalizeResponse(blobId = result.blobId, sessionId = sessionId, sizeBytes = result.sizeBytes, state = "complete"))
             }
             is UploadSessionRepo.FinalizeResult.SessionNotFound -> {

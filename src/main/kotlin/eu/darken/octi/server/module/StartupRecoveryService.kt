@@ -184,6 +184,15 @@ class StartupRecoveryService @Inject constructor(
                             val partFile = sessionDir.resolve(UploadSessionRepo.PART_FILENAME)
                             val blobFile = sessionDir.resolve(UploadSessionRepo.BLOB_FILENAME)
                             if (!partFile.exists() && blobFile.exists()) {
+                                // Symmetric to the COMPLETE branch above: if the blobId is
+                                // already a live blobRef on the module, this session is a
+                                // half-committed remnant — promoting would double-count its
+                                // bytes (live in usedBytes + promoted in reservedBytes).
+                                if (moduleMeta != null && moduleMeta.blobRefs.any { it.blobId == sessionMeta.blobId }) {
+                                    log(TAG) { "recovery.session_stale_committed: promoted-vs-live ${sessionMeta.sessionId}" }
+                                    sessionDir.deleteRecursively()
+                                    return@sessions
+                                }
                                 if (blobFile.fileSize() != sessionMeta.expectedSizeBytes) {
                                     log(TAG) { "recovery.session_invalid_size: promoted ${sessionMeta.sessionId}" }
                                     sessionDir.deleteRecursively()
@@ -320,9 +329,11 @@ class StartupRecoveryService @Inject constructor(
         if (moduleDir.fileName.toString() != meta.moduleId.toModuleDirName()) return false
         if (meta.expectedSizeBytes < 0 || meta.expectedSizeBytes > config.maxBlobBytes) return false
         if (meta.offsetBytes < 0 || meta.offsetBytes > meta.expectedSizeBytes) return false
-        if (meta.hashAlgorithm != null && !meta.hashAlgorithm.equals("sha256", ignoreCase = true) && !meta.hashAlgorithm.equals("SHA-256", ignoreCase = true)) {
-            return false
-        }
+        // Strict-lower "sha256" matches what BlobRoute.createSession accepts. Pre-fix code
+        // here also accepted "SHA-256"; that path is dead in practice (createSession would
+        // have rejected it on the way in) and tolerating it would silently mask invariant
+        // violations for hand-edited or out-of-spec session.json files.
+        if (meta.hashAlgorithm != null && meta.hashAlgorithm != "sha256") return false
         if (meta.hashHex != null && !SHA256_HEX_REGEX.matches(meta.hashHex)) return false
         val expectedSessionDir = config.dataPath
             .resolve("accounts").resolve(meta.accountId.toString())
@@ -336,7 +347,7 @@ class StartupRecoveryService @Inject constructor(
     private fun hasValidCompleteHash(meta: UploadSessionMeta, file: Path): Boolean {
         val hashHex = meta.hashHex ?: return false
         val algorithm = meta.hashAlgorithm ?: return false
-        if (!algorithm.equals("sha256", ignoreCase = true) && !algorithm.equals("SHA-256", ignoreCase = true)) return false
+        if (algorithm != "sha256") return false
         if (!SHA256_HEX_REGEX.matches(hashHex)) return false
         return computeSha256(file) == hashHex
     }
@@ -344,7 +355,7 @@ class StartupRecoveryService @Inject constructor(
     private fun hasValidLiveBlobHash(ref: BlobRef, file: Path): Boolean {
         val hashHex = ref.hashHex ?: return true
         val algorithm = ref.hashAlgorithm ?: return false
-        if (!algorithm.equals("sha256", ignoreCase = true) && !algorithm.equals("SHA-256", ignoreCase = true)) return false
+        if (algorithm != "sha256") return false
         if (!SHA256_HEX_REGEX.matches(hashHex)) return false
         return computeSha256(file) == hashHex
     }

@@ -64,8 +64,12 @@ class ModuleRepo @Inject constructor(
                         val staleModules = device.modulesPath.listDirectoryEntries().filter { path ->
                             val metaFile = path.resolve(META_FILENAME)
                             val accessFile = path.resolve(ACCESS_FILENAME)
-                            // Session-only directory (no module.json, no access.json) — skip, session GC handles it
-                            if (!metaFile.exists() && !accessFile.exists()) {
+                            val payloadFile = path.resolve(BLOB_FILENAME)
+                            // Truly session-only: no live module artefacts (meta, access, or
+                            // payload). Session GC handles the sessions/ subdir on its own.
+                            // Payload-only legacy modules MUST NOT be skipped here — they have
+                            // no module.json/access.json yet but are still subject to expiry.
+                            if (!metaFile.exists() && !accessFile.exists() && !payloadFile.exists()) {
                                 return@filter false
                             }
 
@@ -82,11 +86,18 @@ class ModuleRepo @Inject constructor(
                         if (staleModules.isNotEmpty()) {
                             log(TAG) { "Deleting ${staleModules.size} stale modules for ${device.id}" }
                             var totalReclaimed = 0L
-                            staleModules.forEach {
-                                val bytes = accountForModule(it).bytes
-                                accessShadow.remove(it)
-                                it.deleteRecursively()
-                                totalReclaimed += bytes
+                            staleModules.forEach { mod ->
+                                // Per-module try/catch so one failed delete doesn't strand
+                                // the rest of this device's stale modules. totalReclaimed
+                                // only counts after the delete actually succeeds.
+                                try {
+                                    val bytes = accountForModule(mod).bytes
+                                    accessShadow.remove(mod)
+                                    mod.deleteRecursively()
+                                    totalReclaimed += bytes
+                                } catch (e: Exception) {
+                                    log(TAG, WARN) { "Failed to delete stale module $mod: ${e.message}" }
+                                }
                             }
                             if (totalReclaimed > 0) {
                                 storageTracker.adjustUsed(device.accountId, -totalReclaimed)
@@ -114,10 +125,20 @@ class ModuleRepo @Inject constructor(
                 log(TAG, WARN) { "Failed to read $ACCESS_FILENAME for $modulePath, falling back to mtime: ${e.message}" }
             }
         }
+        // Fall back to module.json mtime (v1 modules without access.json), then to
+        // payload.blob mtime (legacy payload-only modules that haven't migrated yet).
+        if (metaFile.exists()) {
+            try {
+                return metaFile.getLastModifiedTime().toInstant()
+            } catch (e: Exception) {
+                log(TAG, WARN) { "Failed to read mtime for $metaFile: ${e.message}" }
+            }
+        }
+        val payloadFile = modulePath.resolve(BLOB_FILENAME)
         return try {
-            metaFile.getLastModifiedTime().toInstant()
+            if (payloadFile.exists()) payloadFile.getLastModifiedTime().toInstant() else null
         } catch (e: Exception) {
-            log(TAG, WARN) { "Failed to read mtime for $metaFile, skipping: ${e.message}" }
+            log(TAG, WARN) { "Failed to read mtime for $payloadFile, skipping: ${e.message}" }
             null
         }
     }
@@ -277,12 +298,20 @@ class ModuleRepo @Inject constructor(
     }
 
     /**
-     * Updates the access timestamp for a module. Called on blob reads/lists.
+     * Updates the access timestamp for a module. Called on blob reads/lists and on
+     * upload session creation/append/finalize (plan §"Module Expiration Protection").
      * Coalesces disk writes via [recordAccess].
+     *
+     * Skips session-only module dirs (no module.json and no payload.blob): writing
+     * access.json there would create a stray file that prevents the post-abort empty-
+     * parent sweep, and the per-session GC protection covers the lifetime instead.
      */
     fun touchAccess(target: Device, moduleId: ModuleId) {
         val modulePath = target.getModulePath(moduleId)
-        if (modulePath.exists()) {
+        if (!modulePath.exists()) return
+        val hasLiveContent = modulePath.resolve(META_FILENAME).exists()
+            || modulePath.resolve(BLOB_FILENAME).exists()
+        if (hasLiveContent) {
             recordAccess(modulePath, Instant.now())
         }
     }
@@ -293,11 +322,23 @@ class ModuleRepo @Inject constructor(
      * shadow writes so disk-divergence is bounded by one GC tick.
      */
     private fun recordAccess(modulePath: Path, now: Instant) {
-        val prev = accessShadow[modulePath]
-        if (prev == null || Duration.between(prev.lastPersistedAt, now) >= ACCESS_DEBOUNCE) {
+        // Atomic read-modify-write of the shadow entry. Without compute(), two concurrent
+        // recordAccess calls on the same module can both observe the same `prev` and race
+        // on the put — one branch may overwrite a fresher value with an older one.
+        var shouldPersist = false
+        accessShadow.compute(modulePath) { _, prev ->
+            if (prev == null || Duration.between(prev.lastPersistedAt, now) >= ACCESS_DEBOUNCE) {
+                shouldPersist = true
+                AccessState(lastAccessedAt = now, lastPersistedAt = now)
+            } else {
+                prev.copy(lastAccessedAt = now)
+            }
+        }
+        // Disk write happens outside the compute lambda — ConcurrentHashMap docs caution
+        // against long work inside the remapping function. persistAccessMeta also writes
+        // the shadow with the same value as above; the second clobber is idempotent.
+        if (shouldPersist) {
             persistAccessMeta(modulePath, now)
-        } else {
-            accessShadow[modulePath] = prev.copy(lastAccessedAt = now)
         }
     }
 
