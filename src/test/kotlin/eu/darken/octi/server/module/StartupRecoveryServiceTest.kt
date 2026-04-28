@@ -6,7 +6,9 @@ import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.Test
 import java.time.Instant
 import java.util.*
+import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
+import kotlin.io.path.writeText
 
 class StartupRecoveryServiceTest : TestRunner() {
 
@@ -143,6 +145,31 @@ class StartupRecoveryServiceTest : TestRunner() {
     }
 
     // ---------- session branches ----------
+
+    @Test
+    fun `orphaned session_json_tmp without final session_json deletes session dir`() {
+        // Process death between writeText(session.json.tmp) and rename(session.json) leaves the
+        // session dir holding only a partial .tmp file. Recovery must treat it the same as
+        // "no session.json present" — drop the dir, don't crash on the dangling tmp.
+        val accountId = UUID.randomUUID()
+        val deviceId = UUID.randomUUID()
+        val moduleId = "eu.darken.octi.recovery.session.tmponly"
+
+        lateinit var sessionDir: java.nio.file.Path
+
+        runTest2(seed = { cfg ->
+            BlobFixtures.seedAccountDevice(cfg.dataPath, accountId, deviceId)
+            val moduleDir = BlobFixtures.moduleDir(cfg.dataPath, accountId, deviceId, moduleId)
+            sessionDir = BlobFixtures.sessionDir(moduleDir, UUID.randomUUID().toString()).also {
+                it.createDirectories()
+                // Half-written session.json.tmp — never renamed to session.json.
+                it.resolve("session.json.tmp").writeText("{\"sessionId\":\"abc\",\"blobId\":\"par")
+            }
+        }) {
+            component.storageTracker().getUsage(accountId).reservedBytes shouldBe 0
+            sessionDir.exists() shouldBe false
+        }
+    }
 
     @Test
     fun `malformed session json deletes session dir and counts no reservation`() {
