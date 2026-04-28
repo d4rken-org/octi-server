@@ -1,0 +1,37 @@
+# Local-only cross-version regression scaffolding.
+#
+# Brings up a v0.8.1 server (legacy) and a freshly built HEAD server side-by-side so a
+# developer can point Android emulators at either one and exercise old-client × new-server
+# and new-client × old-server scenarios before a production cutover.
+#
+# This file is committed; the data directories it mounts (./data-legacy, ./data-prod-replay)
+# are gitignored. Use replay-prod.local.sh to seed data-prod-replay from zdatapath-prod.zip.
+# Prod data is never expected to leave the developer's machine.
+#
+# Usage:
+#   cd sync-server/regression
+#   ./replay-prod.local.sh        # one-time: unzips ../zdatapath-prod.zip into data-prod-replay/
+#   docker compose up new-server  # bring up new server with prod replay data
+#   docker compose up legacy-server  # bring up v0.8.1 server with empty data dir
+#
+# Both services bind to localhost only — they're not meant to be reachable from anywhere else.
+services:
+  legacy-server:
+    image: ghcr.io/d4rken-org/octi-server:0.8.1
+    container_name: octi-legacy
+    ports: ["127.0.0.1:18080:8080"]
+    volumes:
+      - ./data-legacy:/etc/octi-server
+    restart: "no"
+
+  new-server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: octi-new
+    ports: ["127.0.0.1:18081:8080"]
+    volumes:
+      - ./data-prod-replay:/etc/octi-server
+    environment:
+      OCTI_DEBUG: "true"
+    restart: "no"

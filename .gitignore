@@ -49,3 +49,8 @@ zdatapath*
 /.codex
 
 current.log
+
+# Local cross-version regression scaffolding (regression/docker-compose.yml).
+# Data dirs that mount into the containers; never commit.
+regression/data-legacy/
+regression/data-prod-replay/
