@@ -64,6 +64,21 @@ kotlin {
     }
 }
 
+// Synthetic data dir generator for the regression-synthetic-replay CI job. Runs against the
+// test classpath so it can use SyntheticDataFixture + BlobFixtures. Pass the output dir (and
+// optional account count) via -PsyntheticOutputDir / -PsyntheticAccountCount.
+tasks.register("generateSyntheticData", JavaExec::class) {
+    group = "regression"
+    description = "Generate a synthetic data tree for the cross-version regression CI job"
+    dependsOn("testClasses")
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("eu.darken.octi.server.regression.SyntheticDataFixture")
+    val outputDir = project.findProperty("syntheticOutputDir") as String?
+        ?: layout.buildDirectory.dir("regression-synthetic").get().asFile.absolutePath
+    val accountCount = project.findProperty("syntheticAccountCount") as String? ?: "500"
+    args = listOf(outputDir, accountCount)
+}
+
 tasks.register("generateBuildInfo") {
     val outputFile = layout.buildDirectory.file("generated/buildinfo/BuildInfo.kt")
     outputs.file(outputFile)

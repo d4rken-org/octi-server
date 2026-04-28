@@ -60,3 +60,63 @@ jobs:
         uses: ./.github/actions/common-setup
       - name: Check code and run tests
         run: ./gradlew check
+
+  regression-synthetic-replay:
+    name: Cross-version regression (synthetic replay)
+    runs-on: ubuntu-24.04
+    needs: [run-tests, build-docker-image]
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 #v4
+        with:
+          persist-credentials: false
+      - name: Setup project and build environment
+        uses: ./.github/actions/common-setup
+      - name: Generate synthetic data tree (~500 accounts)
+        run: ./gradlew generateSyntheticData -PsyntheticOutputDir="$GITHUB_WORKSPACE/regression-data" -PsyntheticAccountCount=500
+      - name: Build Docker image
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 #v7.0.0
+        with:
+          context: .
+          tags: octi-server:regression
+          load: true
+          push: false
+          platforms: linux/amd64
+      - name: Boot server with synthetic data and probe
+        run: |
+          set -euo pipefail
+          docker run -d --name octi-regression \
+            -p 18082:8080 \
+            -e OCTI_DEBUG=true \
+            -v "$GITHUB_WORKSPACE/regression-data:/etc/octi-server" \
+            octi-server:regression
+          # Give recovery a moment to walk the tree.
+          for attempt in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18082/v1/status > /dev/null; then
+              echo "server up after ${attempt}s"
+              break
+            fi
+            sleep 1
+            if [ "$attempt" = "30" ]; then
+              echo "server did not respond within 30s" >&2
+              docker logs octi-regression || true
+              exit 1
+            fi
+          done
+          curl -sf http://127.0.0.1:18082/v1/status
+      - name: Verify recovery did not log malformed entries
+        run: |
+          set -euo pipefail
+          # Production code never logs `recovery.*malformed` for legitimate trees; any hit
+          # means the synthetic fixture is shaped wrong OR a real recovery regression. Either
+          # way we want CI to fail loud.
+          if docker logs octi-regression 2>&1 | grep -E "recovery\.[a-z_]+_malformed"; then
+            echo "found recovery.*malformed in logs — failing" >&2
+            exit 1
+          fi
+      - name: Cleanup
+        if: always()
+        run: |
+          docker logs octi-regression 2>&1 | tail -200 || true
+          docker rm -f octi-regression || true
+          rm -rf "$GITHUB_WORKSPACE/regression-data" || true
