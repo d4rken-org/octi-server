@@ -11,9 +11,12 @@ import eu.darken.octi.server.common.debug.logging.Logging.Priority.*
 import eu.darken.octi.server.common.debug.logging.asLog
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import java.io.IOException
 import java.time.Duration
@@ -36,6 +39,8 @@ class DeviceRepo @Inject constructor(
 
     private val devices = ConcurrentHashMap<DeviceKey, Device>()
     private val lastSeenPersistedAt = ConcurrentHashMap<DeviceKey, Instant>()
+    private val deletingDevices = mutableMapOf<DeviceKey, PendingDeviceDeletion>()
+    private val deletingDeviceIds = mutableMapOf<DeviceId, PendingDeviceDeletion>()
     private val mutex = Mutex()
 
     init {
@@ -108,6 +113,28 @@ class DeviceRepo @Inject constructor(
         path.resolve(DEVICE_FILENAME).writeText(serializer.encodeToString(data))
     }
 
+    private data class PendingDeviceDeletion(
+        val device: Device,
+        val completed: CompletableDeferred<Unit> = CompletableDeferred(),
+    )
+
+    private fun trackPendingDeletion(device: Device): PendingDeviceDeletion {
+        val pendingDeletion = PendingDeviceDeletion(device)
+        deletingDevices[device.key] = pendingDeletion
+        deletingDeviceIds[device.id] = pendingDeletion
+        return pendingDeletion
+    }
+
+    private suspend fun finishPendingDeletion(pendingDeletion: PendingDeviceDeletion) {
+        withContext(NonCancellable) {
+            mutex.withLock {
+                deletingDevices.remove(pendingDeletion.device.key, pendingDeletion)
+                deletingDeviceIds.remove(pendingDeletion.device.id, pendingDeletion)
+            }
+            pendingDeletion.completed.complete(Unit)
+        }
+    }
+
     suspend fun createDevice(
         account: Account,
         deviceId: DeviceId,
@@ -126,35 +153,43 @@ class DeviceRepo @Inject constructor(
             accountId = account.id,
             path = account.path.resolve("$DEVICES_DIR/${data.id}")
         )
-        mutex.withLock {
-            if (devices[device.key] != null) throw IllegalStateException("Device already exists: ${device.key}")
-            if (devices.values.any { it.id == device.id }) {
-                throw IllegalStateException("Device ID already registered to another account: ${device.id}")
-            }
-            // Count cap is enforced under the same mutex that registers the new device,
-            // so two concurrent creates can't both pass the check.
-            val currentDeviceCount = devices.values.count { it.accountId == account.id }
-            if (currentDeviceCount >= config.maxDevicesPerAccount) {
-                throw DeviceLimitExceededException(config.maxDevicesPerAccount)
-            }
+        while (true) {
+            val pendingDeletion = mutex.withLock {
+                val pendingDeletion = deletingDevices[device.key] ?: deletingDeviceIds[device.id]
+                if (pendingDeletion != null) {
+                    pendingDeletion
+                } else {
+                    if (devices[device.key] != null) throw IllegalStateException("Device already exists: ${device.key}")
+                    if (devices.values.any { it.id == device.id }) {
+                        throw IllegalStateException("Device ID already registered to another account: ${device.id}")
+                    }
+                    // Count cap is enforced under the same mutex that registers the new device,
+                    // so two concurrent creates can't both pass the check.
+                    val currentDeviceCount = devices.values.count { it.accountId == account.id }
+                    if (currentDeviceCount >= config.maxDevicesPerAccount) {
+                        throw DeviceLimitExceededException(config.maxDevicesPerAccount)
+                    }
 
-            device.path.run {
-                if (!parent.exists()) {
-                    parent.createDirectory()
-                    log(TAG) { "Created parent dir for $this" }
-                }
-                if (!exists()) {
-                    createDirectory()
-                    log(TAG) { "Created dir for $this" }
+                    device.path.run {
+                        if (!parent.exists()) {
+                            parent.createDirectory()
+                            log(TAG) { "Created parent dir for $this" }
+                        }
+                        if (!exists()) {
+                            createDirectory()
+                            log(TAG) { "Created dir for $this" }
+                        }
+                    }
+                    device.writeDevice()
+                    lastSeenPersistedAt[device.key] = device.lastSeen
+                    log(TAG, VERBOSE) { "Device written: $this" }
+                    devices[device.key] = device
+                    log(TAG) { "createDevice(): Device created $device" }
+                    return device
                 }
             }
-            device.writeDevice()
-            lastSeenPersistedAt[device.key] = device.lastSeen
-            log(TAG, VERBOSE) { "Device written: $this" }
-            devices[device.key] = device
+            pendingDeletion.completed.await()
         }
-        log(TAG) { "createDevice(): Device created $device" }
-        return device
     }
 
     suspend fun getDevice(key: DeviceKey): Device? {
@@ -177,48 +212,77 @@ class DeviceRepo @Inject constructor(
 
     suspend fun deleteDevice(key: DeviceKey) {
         log(TAG, VERBOSE) { "deleteDevice($key)..." }
-        val toDelete = mutex.withLock {
-            devices.remove(key).also { lastSeenPersistedAt.remove(key) } ?: throw IllegalArgumentException("$key not found")
+        val pendingDeletion = mutex.withLock {
+            val toDelete = devices.remove(key).also { lastSeenPersistedAt.remove(key) }
+                ?: throw IllegalArgumentException("$key not found")
+            trackPendingDeletion(toDelete)
         }
-        toDelete.sync.withLock {
-            toDelete.path.deleteRecursively()
-            log(TAG) { "deleteDevice($key): Device deleted: $toDelete" }
+        try {
+            pendingDeletion.device.sync.withLock {
+                val toDelete = pendingDeletion.device
+                toDelete.path.deleteRecursively()
+                log(TAG) { "deleteDevice($key): Device deleted: $toDelete" }
+            }
+        } finally {
+            finishPendingDeletion(pendingDeletion)
         }
     }
 
     suspend fun deleteDevices(accountId: AccountId) {
         log(TAG, VERBOSE) { "deleteDevices($accountId)..." }
-        val toDelete = mutex.withLock {
+        val pendingDeletions = mutex.withLock {
             devices
                 .filter { it.value.accountId == accountId }
                 .map {
                     lastSeenPersistedAt.remove(it.key)
-                    devices.remove(it.key)!!
+                    trackPendingDeletion(devices.remove(it.key)!!)
                 }
         }
-        log(TAG) { "deleteDevices($accountId): Deleting ${toDelete.size} devices" }
-        toDelete.forEach { device ->
-            device.sync.withLock {
-                device.path.deleteRecursively()
-                log(TAG) { "deleteDevices($accountId): Device deleted: $device" }
+        log(TAG) { "deleteDevices($accountId): Deleting ${pendingDeletions.size} devices" }
+        var firstFailure: Throwable? = null
+        pendingDeletions.forEach { pendingDeletion ->
+            try {
+                val device = pendingDeletion.device
+                device.sync.withLock {
+                    device.path.deleteRecursively()
+                    log(TAG) { "deleteDevices($accountId): Device deleted: $device" }
+                }
+            } catch (t: Throwable) {
+                if (firstFailure == null) {
+                    firstFailure = t
+                } else {
+                    firstFailure.addSuppressed(t)
+                }
+            } finally {
+                finishPendingDeletion(pendingDeletion)
             }
         }
+        firstFailure?.let { throw it }
     }
 
     suspend fun updateDevice(key: DeviceKey, action: (Device.Data) -> Device.Data) {
-        val device = devices[key] ?: return
+        val device = mutex.withLock { devices[key] } ?: return
         device.sync.withLock {
-            val newDevice = device.copy(data = action(device.data))
-            val oldWithoutLastSeen = device.data.copy(lastSeen = newDevice.lastSeen)
+            val current = mutex.withLock {
+                devices[key]?.takeIf { it.sync === device.sync }
+            } ?: return
+            val newDevice = current.copy(data = action(current.data))
+            val oldWithoutLastSeen = current.data.copy(lastSeen = newDevice.lastSeen)
             val metadataChanged = oldWithoutLastSeen != newDevice.data
-            val lastPersisted = lastSeenPersistedAt[key] ?: device.lastSeen
+            val lastPersisted = lastSeenPersistedAt[key] ?: current.lastSeen
             val shouldPersist = metadataChanged ||
                 Duration.between(lastPersisted, newDevice.lastSeen) >= LAST_SEEN_DEBOUNCE
             if (shouldPersist) {
                 newDevice.writeDevice()
-                lastSeenPersistedAt[key] = newDevice.lastSeen
             }
-            devices[key] = newDevice
+            mutex.withLock {
+                if (devices[key]?.sync === device.sync) {
+                    devices[key] = newDevice
+                    if (shouldPersist) {
+                        lastSeenPersistedAt[key] = newDevice.lastSeen
+                    }
+                }
+            }
         }
     }
 
