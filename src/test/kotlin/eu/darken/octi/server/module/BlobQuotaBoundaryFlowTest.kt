@@ -8,6 +8,7 @@ import io.ktor.http.*
 import kotlinx.serialization.Serializable
 import org.junit.jupiter.api.Test
 import java.util.*
+import kotlin.io.path.createDirectories
 
 private fun base64Encode(data: ByteArray): String = Base64.getEncoder().encodeToString(data)
 
@@ -25,6 +26,39 @@ class BlobQuotaBoundaryFlowTest : TestRunner() {
         val blobId: String = "",
         val sessionId: String = "",
     )
+
+    private suspend fun TestEnvironment.createFinalizedSession(
+        creds: Credentials,
+        moduleId: String,
+        payload: ByteArray,
+    ): SessionInfo {
+        val hash = payload.sha256Hex()
+        val session = http.post("/v1/module/$moduleId/blob-sessions") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            contentType(ContentType.Application.Json)
+            setBody("""{"sizeBytes": ${payload.size}, "hashAlgorithm": "sha256", "hashHex": "$hash"}""")
+        }.body<SessionInfo>()
+
+        if (payload.isNotEmpty()) {
+            http.patch("/v1/module/$moduleId/blob-sessions/${session.sessionId}") {
+                url { parameters.append("device-id", creds.deviceId.toString()) }
+                addCredentials(creds)
+                header("Upload-Offset", "0")
+                contentType(ContentType.Application.OctetStream)
+                setBody(payload)
+            }.status shouldBe HttpStatusCode.NoContent
+        }
+
+        http.post("/v1/module/$moduleId/blob-sessions/${session.sessionId}/finalize") {
+            url { parameters.append("device-id", creds.deviceId.toString()) }
+            addCredentials(creds)
+            contentType(ContentType.Application.Json)
+            setBody("{}")
+        }.status shouldBe HttpStatusCode.OK
+
+        return session
+    }
 
     @Test
     fun `session at exact quota succeeds, one more byte returns 507`() {
@@ -73,6 +107,40 @@ class BlobQuotaBoundaryFlowTest : TestRunner() {
                 setBody("""{"sizeBytes": 1024}""")
             }
             second.status shouldBe HttpStatusCode.Created
+        }
+    }
+
+    @Test
+    fun `failed PUT after consuming blob releases reservation`() {
+        runTest2(appConfig = baseConfig.copy(accountQuotaBytes = 1024, maxBlobBytes = 10_000)) {
+            val creds = createDevice()
+            val accountId = UUID.fromString(creds.account)
+            val failingModuleId = "eu.darken.octi.quota.failedput"
+            val payload = ByteArray(1024) { 7 }
+            val session = createFinalizedSession(creds, failingModuleId, payload)
+
+            component.storageTracker().getUsage(accountId).reservedBytes shouldBe 1024
+
+            val moduleDir = BlobFixtures.moduleDir(config.dataPath, accountId, creds.deviceId, failingModuleId)
+            moduleDir.resolve("module.json.tmp").createDirectories()
+
+            http.put("/v1/module/$failingModuleId") {
+                url { parameters.append("device-id", creds.deviceId.toString()) }
+                addCredentials(creds)
+                header("If-None-Match", "*")
+                contentType(ContentType.Application.Json)
+                setBody("""{"documentBase64": "${base64Encode(ByteArray(0))}", "blobRefs": [{"blobId": "${session.blobId}"}]}""")
+            }.status shouldBe HttpStatusCode.InternalServerError
+
+            component.storageTracker().getUsage(accountId).reservedBytes shouldBe 0
+            component.sessionRepo().getSession(session.sessionId, accountId, creds.deviceId, failingModuleId) shouldBe null
+
+            http.post("/v1/module/eu.darken.octi.quota.retry/blob-sessions") {
+                url { parameters.append("device-id", creds.deviceId.toString()) }
+                addCredentials(creds)
+                contentType(ContentType.Application.Json)
+                setBody("""{"sizeBytes": 1024}""")
+            }.status shouldBe HttpStatusCode.Created
         }
     }
 

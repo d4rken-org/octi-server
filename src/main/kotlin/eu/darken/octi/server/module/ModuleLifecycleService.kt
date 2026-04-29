@@ -52,6 +52,12 @@ class ModuleLifecycleService @Inject constructor(
         data class EtagMismatch(val currentEtag: String) : DeleteBlobResult
     }
 
+    private data class ConsumedBlob(
+        val meta: UploadSessionMeta,
+        val liveBlobFile: Path,
+        val sessionDir: Path,
+    )
+
     /**
      * Legacy POST write — under device lock, loads old meta, rejects if blob-backed,
      * pre-checks the document quota delta, writes payload, settles quota, aborts
@@ -235,6 +241,24 @@ class ModuleLifecycleService @Inject constructor(
                 return@withLock CommitResult.QuotaExceeded to emptyList<Path>()
             }
             var rollbackDocDelta = docDelta > 0
+            var commitPointReached = false
+            val consumedBlobs = mutableListOf<ConsumedBlob>()
+
+            fun rollbackConsumedBlobs() {
+                if (consumedBlobs.isEmpty()) return
+                consumedBlobs.asReversed().forEach { consumed ->
+                    try {
+                        consumed.liveBlobFile.parent?.deleteRecursively()
+                    } catch (e: Exception) {
+                        log(TAG, WARN) { "commitModule: failed to rollback consumed blob ${consumed.liveBlobFile}: ${e.message}" }
+                    }
+                    sessionRepo.removeConsumedSession(consumed.meta.sessionId, consumed.sessionDir)
+                    if (consumed.meta.expectedSizeBytes > 0) {
+                        storageTracker.releaseReservation(caller.accountId, consumed.meta.expectedSizeBytes)
+                    }
+                }
+                consumedBlobs.clear()
+            }
 
             try {
                 val modulePath = moduleRepo.resolveModulePath(target, moduleId)
@@ -265,60 +289,54 @@ class ModuleLifecycleService @Inject constructor(
 
                 // Pass 2 — move staged blobs into live storage. peek+consume is TOCTOU
                 // (GC can terminate a peeked session before consume runs); on any failure
-                // here, roll back already-moved blobs by deleting their storageKey dirs.
+                // before module.json becomes the commit point, rollbackConsumedBlobs()
+                // deletes already-moved payloads and releases their reservations.
                 val newBlobRefs = mutableListOf<BlobRef>()
-                val movedDestPaths = mutableListOf<Path>()
-                fun rollbackMoves() {
-                    movedDestPaths.forEach { dest ->
-                        runCatching { dest.parent?.deleteRecursively() }
+                for (blobId in blobRefIds) {
+                    val existingRef = existingMeta?.blobRefs?.find { it.blobId == blobId }
+                    if (existingRef != null) {
+                        newBlobRefs.add(existingRef)
+                        continue
                     }
-                }
-                try {
-                    for (blobId in blobRefIds) {
-                        val existingRef = existingMeta?.blobRefs?.find { it.blobId == blobId }
-                        if (existingRef != null) {
-                            newBlobRefs.add(existingRef)
-                            continue
-                        }
-                        var capturedDest: Path? = null
-                        val consumed = sessionRepo.consumeAndMoveCompletedBlob(
-                            blobId = blobId,
-                            accountId = caller.accountId,
-                            deviceId = target.id,
-                            moduleId = moduleId,
-                        ) { meta ->
-                            val prefix = meta.storageKey.take(4)
-                            val destPath = modulePath.resolve("blobs").resolve(prefix).resolve(meta.storageKey).resolve("payload.blob")
-                            capturedDest = destPath
-                            destPath
-                        }
-                        val sessionMeta = when (consumed) {
-                            is UploadSessionRepo.ConsumeResult.Ready -> {
-                                capturedDest?.let { movedDestPaths.add(it) }
-                                consumed.meta
-                            }
-                            UploadSessionRepo.ConsumeResult.SessionNotFound -> {
-                                rollbackMoves()
-                                return@withLock CommitResult.BadRequest("Referenced blobId not found: $blobId") to emptyList<Path>()
-                            }
-                            UploadSessionRepo.ConsumeResult.PayloadMissing -> {
-                                rollbackMoves()
-                                return@withLock CommitResult.BadRequest("Staged blob payload missing for $blobId") to emptyList<Path>()
-                            }
-                        }
-                        newBlobRefs.add(
-                            BlobRef(
-                                blobId = sessionMeta.blobId,
-                                storageKey = sessionMeta.storageKey,
-                                sizeBytes = sessionMeta.expectedSizeBytes,
-                                hashAlgorithm = sessionMeta.hashAlgorithm,
-                                hashHex = sessionMeta.hashHex,
+                    var capturedDest: Path? = null
+                    val consumed = sessionRepo.consumeAndMoveCompletedBlob(
+                        blobId = blobId,
+                        accountId = caller.accountId,
+                        deviceId = target.id,
+                        moduleId = moduleId,
+                    ) { meta ->
+                        val prefix = meta.storageKey.take(4)
+                        val destPath = modulePath.resolve("blobs").resolve(prefix).resolve(meta.storageKey).resolve("payload.blob")
+                        capturedDest = destPath
+                        destPath
+                    }
+                    val sessionMeta = when (consumed) {
+                        is UploadSessionRepo.ConsumeResult.Ready -> {
+                            val liveBlobFile = capturedDest
+                                ?: throw IllegalStateException("Consumed blob destination was not captured")
+                            consumedBlobs.add(
+                                ConsumedBlob(
+                                    meta = consumed.meta,
+                                    liveBlobFile = liveBlobFile,
+                                    sessionDir = consumed.sessionDir,
+                                )
                             )
-                        )
+                            consumed.meta
+                        }
+                        UploadSessionRepo.ConsumeResult.SessionNotFound ->
+                            return@withLock CommitResult.BadRequest("Referenced blobId not found: $blobId") to emptyList<Path>()
+                        UploadSessionRepo.ConsumeResult.PayloadMissing ->
+                            return@withLock CommitResult.BadRequest("Staged blob payload missing for $blobId") to emptyList<Path>()
                     }
-                } catch (e: Exception) {
-                    rollbackMoves()
-                    throw e
+                    newBlobRefs.add(
+                        BlobRef(
+                            blobId = sessionMeta.blobId,
+                            storageKey = sessionMeta.storageKey,
+                            sizeBytes = sessionMeta.expectedSizeBytes,
+                            hashAlgorithm = sessionMeta.hashAlgorithm,
+                            hashHex = sessionMeta.hashHex,
+                        )
+                    )
                 }
 
                 // Write payload.blob first, then module.json as commit point
@@ -343,25 +361,29 @@ class ModuleLifecycleService @Inject constructor(
                 val tempMeta = modulePath.resolve("module.json.tmp")
                 tempMeta.writeText(json.encodeToString(meta))
                 tempMeta.moveTo(metaFile, overwrite = true)
+                commitPointReached = true
+                rollbackDocDelta = false
 
-                // Update access metadata
-                val accessFile = modulePath.resolve("access.json")
-                val tempAccess = modulePath.resolve("access.json.tmp")
-                tempAccess.writeText(json.encodeToString(AccessMeta(lastAccessedAt = now)))
-                tempAccess.moveTo(accessFile, overwrite = true)
+                // Update access metadata. module.json is the commit point; an access
+                // write failure must not turn a committed module into a quota rollback.
+                try {
+                    val accessFile = modulePath.resolve("access.json")
+                    val tempAccess = modulePath.resolve("access.json.tmp")
+                    tempAccess.writeText(json.encodeToString(AccessMeta(lastAccessedAt = now)))
+                    tempAccess.moveTo(accessFile, overwrite = true)
+                } catch (e: Exception) {
+                    log(TAG, WARN) { "commitModule: failed to persist access metadata for $moduleId: ${e.message}" }
+                }
 
-                // Clean up committed sessions
-                for (ref in newBlobRefs) {
-                    if (existingMeta?.blobRefs?.any { it.blobId == ref.blobId } != true) {
-                        sessionRepo.removeCommittedSessionByBlobId(ref.blobId)
-                    }
+                // Clean up sessions whose payloads were consumed by this commit. Quota is
+                // settled below; this deletion deliberately does not release reservations.
+                for (consumed in consumedBlobs) {
+                    sessionRepo.removeConsumedSession(consumed.meta.sessionId, consumed.sessionDir)
                 }
 
                 // Quota update for blobs and shrinking documents. Positive doc delta was
                 // already applied by tryAdjustUsed above.
-                val newReferencedBytes = newBlobRefs.filter { ref ->
-                    existingMeta?.blobRefs?.any { it.blobId == ref.blobId } != true
-                }.sumOf { it.sizeBytes }
+                val newReferencedBytes = consumedBlobs.sumOf { it.meta.expectedSizeBytes }
                 val orphanedBlobRefs = existingMeta?.blobRefs
                     ?.filter { old -> newBlobRefs.none { it.blobId == old.blobId } }
                     ?: emptyList()
@@ -373,7 +395,6 @@ class ModuleLifecycleService @Inject constructor(
                 if (docDelta < 0) {
                     storageTracker.adjustUsed(caller.accountId, docDelta)
                 }
-                rollbackDocDelta = false
 
                 // Collect orphaned blob paths for async deletion outside the lock —
                 // deleting here would block every concurrent read/write for large orphans.
@@ -385,6 +406,9 @@ class ModuleLifecycleService @Inject constructor(
                 log(TAG) { "commitModule(${caller.id.shortId()}): $moduleId committed, etag=$newEtag" }
                 CommitResult.Success(newEtag) to orphansToDelete
             } finally {
+                if (!commitPointReached) {
+                    rollbackConsumedBlobs()
+                }
                 if (rollbackDocDelta) {
                     storageTracker.adjustUsed(caller.accountId, -docDelta)
                 }

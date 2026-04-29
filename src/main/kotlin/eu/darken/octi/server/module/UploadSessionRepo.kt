@@ -451,7 +451,7 @@ class UploadSessionRepo @Inject constructor(
     // region Lookups (scoped)
 
     sealed interface ConsumeResult {
-        data class Ready(val meta: UploadSessionMeta) : ConsumeResult
+        data class Ready(val meta: UploadSessionMeta, val sessionDir: Path) : ConsumeResult
         data object SessionNotFound : ConsumeResult
         data object PayloadMissing : ConsumeResult
     }
@@ -501,7 +501,7 @@ class UploadSessionRepo @Inject constructor(
             // cleans it up after the module.json rename. terminateSessionLocked sees the empty
             // session dir (staged file is gone) and skips releaseReservation — commitReservation
             // owns the reserved→used transition.
-            ConsumeResult.Ready(meta = current.meta)
+            ConsumeResult.Ready(meta = current.meta, sessionDir = current.sessionDir)
         }
     }
 
@@ -550,6 +550,21 @@ class UploadSessionRepo @Inject constructor(
         } catch (e: Exception) {
             log(TAG, WARN) { "removeCommittedSession: failed to clean up ${entry.key}: ${e.message}" }
         }
+    }
+
+    /**
+     * Drops a session whose staged payload has already been consumed by commit logic.
+     * Does not release quota; the caller owns the reserved -> used or reserved -> free
+     * transition after moving the staged payload out of the session directory.
+     */
+    fun removeConsumedSession(sessionId: String, sessionDir: Path) {
+        sessions.remove(sessionId)
+        try {
+            sessionDir.deleteRecursively()
+        } catch (e: Exception) {
+            log(TAG, WARN) { "removeConsumedSession: failed to clean up $sessionId: ${e.message}" }
+        }
+        cleanupEmptyParentsAfterSession(sessionDir)
     }
 
     /**
