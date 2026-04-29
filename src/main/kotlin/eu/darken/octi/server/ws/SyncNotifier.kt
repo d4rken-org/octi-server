@@ -2,6 +2,7 @@ package eu.darken.octi.server.ws
 
 import eu.darken.octi.server.account.AccountId
 import eu.darken.octi.server.common.AppScope
+import eu.darken.octi.server.common.launchPeriodicJob
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.INFO
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.VERBOSE
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.WARN
@@ -17,6 +18,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import java.time.Duration
 import java.time.Instant
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -56,6 +58,20 @@ class SyncNotifier @Inject constructor(
 
     private val lock = Mutex()
     private val pending = mutableMapOf<AccountId, PendingBroadcast>()
+    private val stats = SyncNotificationStats()
+
+    init {
+        appScope.launchPeriodicJob(
+            tag = TAG,
+            interval = STATS_INTERVAL,
+            initialDelay = STATS_INTERVAL,
+            onErrorMessage = "Sync notification stats reporting failed",
+        ) {
+            stats.snapshotAndReset()?.let { snapshot ->
+                log(TAG, INFO) { snapshot.format(STATS_INTERVAL) }
+            }
+        }
+    }
 
     suspend fun enqueueModuleChanged(
         accountId: AccountId,
@@ -98,16 +114,18 @@ class SyncNotifier @Inject constructor(
             val broadcast = lock.withLock {
                 pending.remove(accountId)
             } ?: return@launch
+            stats.recordBatch(broadcast.events)
 
             val allPeers = connectionRegistry.getAccountSessions(accountId)
 
             if (allPeers.isEmpty()) {
+                stats.recordNoPeers()
                 log(TAG, VERBOSE) { "broadcast(): No peers for account=$accountId, dropping ${broadcast.events.size} events" }
                 return@launch
             }
 
             val moduleIds = broadcast.events.joinToString { (it as? EventPayload.Event.ModuleChanged)?.moduleId ?: "?" }
-            log(TAG, INFO) { "broadcast(): Sending [$moduleIds] to account=$accountId" }
+            log(TAG) { "broadcast(): Sending [$moduleIds] to account=$accountId" }
 
             allPeers.forEach { peer ->
                 val peerDeviceIdStr = peer.deviceId.toString()
@@ -121,6 +139,7 @@ class SyncNotifier @Inject constructor(
                     }
                 }
                 if (relevantEvents.isEmpty()) {
+                    stats.recordSkippedSelfPeer()
                     log(TAG) { "broadcast(): Skipping device=${peer.deviceId} (all events originated from this device)" }
                     return@forEach
                 }
@@ -128,10 +147,13 @@ class SyncNotifier @Inject constructor(
                 val payload = json.encodeToString(EventPayload(events = relevantEvents))
                 val result = peer.outbox.trySend(payload)
                 if (result.isSuccess) {
+                    stats.recordDelivery(relevantEvents.size)
                     log(TAG) { "broadcast(): Delivered ${relevantEvents.size} events to device=${peer.deviceId}" }
                 } else if (result.isClosed) {
+                    stats.recordClosedSession()
                     log(TAG, WARN) { "broadcast(): Session closed for device=${peer.deviceId}, skipping" }
                 } else {
+                    stats.recordBufferFullDrop()
                     log(TAG, WARN) { "broadcast(): Buffer full for device=${peer.deviceId}, dropping notification" }
                 }
             }
@@ -139,12 +161,14 @@ class SyncNotifier @Inject constructor(
             log(TAG) { "broadcast(): Debounce reset for account=$accountId" }
             throw e
         } catch (e: Exception) {
+            stats.recordFailure()
             log(TAG, WARN) { "broadcast(): Failed for account=$accountId: ${e.message}" }
         }
     }
 
     companion object {
         private const val DEBOUNCE_MS = 500L
+        private val STATS_INTERVAL: Duration = Duration.ofMinutes(1)
         private val TAG = logTag("WS", "SyncNotifier")
     }
 }
