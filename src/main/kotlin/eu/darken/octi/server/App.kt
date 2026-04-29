@@ -9,6 +9,7 @@ import eu.darken.octi.server.common.debug.logging.Logging.Priority.*
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
 import eu.darken.octi.server.common.debug.DebugFlagMonitor
+import eu.darken.octi.server.device.DeviceActivityReporter
 import eu.darken.octi.server.module.StartupRecoveryService
 import eu.darken.octi.server.module.UploadSessionRepo
 import java.nio.file.Path
@@ -26,6 +27,7 @@ class App @Inject constructor(
     private val sessionRepo: UploadSessionRepo,
     private val diskSpaceProbe: DiskSpaceProbe,
     @Suppress("unused") private val debugFlagMonitor: DebugFlagMonitor,
+    @Suppress("unused") private val deviceActivityReporter: DeviceActivityReporter,
 ) {
 
     fun launch() {

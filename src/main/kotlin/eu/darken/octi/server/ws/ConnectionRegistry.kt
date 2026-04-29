@@ -128,6 +128,8 @@ class ConnectionRegistry(
         return sessions.values.filter { it.accountId == accountId && it.deviceId != excludeDevice }
     }
 
+    fun activeDeviceKeys(): Set<DeviceKey> = sessions.keys.toSet()
+
     fun stats(): Stats = Stats(
         totalDevices = sessions.size,
         totalAccounts = sessions.values.map { it.accountId }.distinct().size,

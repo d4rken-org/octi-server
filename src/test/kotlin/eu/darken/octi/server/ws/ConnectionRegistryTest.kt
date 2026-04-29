@@ -1,6 +1,7 @@
 package eu.darken.octi.server.ws
 
 import eu.darken.octi.server.common.AppScope
+import eu.darken.octi.server.device.DeviceKey
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.runBlocking
 import io.kotest.matchers.collections.shouldBeEmpty
@@ -114,6 +115,21 @@ class ConnectionRegistryTest {
 
         registerDevice(device3, accountB)
         registry.stats() shouldBe ConnectionRegistry.Stats(totalDevices = 3, totalAccounts = 2)
+    }
+
+    @Test
+    fun `activeDeviceKeys returns connected device snapshot`() = runBlocking {
+        val session = registerDevice(device1, accountA)
+        registerDevice(device2, accountA)
+
+        registry.activeDeviceKeys() shouldBe setOf(
+            DeviceKey(accountA, device1),
+            DeviceKey(accountA, device2),
+        )
+
+        registry.unregister(session)
+
+        registry.activeDeviceKeys() shouldBe setOf(DeviceKey(accountA, device2))
     }
 
     @Nested
