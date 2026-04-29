@@ -1,7 +1,7 @@
 plugins {
     kotlin("jvm") version "2.3.10"
     application
-    id("com.google.devtools.ksp") version "2.3.5"
+    id("com.google.devtools.ksp") version "2.3.6"
     kotlin("plugin.serialization") version "2.3.10"
     id("io.ktor.plugin") version "3.4.0"
 }
@@ -14,8 +14,8 @@ repositories {
 }
 
 dependencies {
-    implementation("com.google.dagger:dagger:2.59.1")
-    ksp("com.google.dagger:dagger-compiler:2.59.1")
+    implementation("com.google.dagger:dagger:2.59.2")
+    ksp("com.google.dagger:dagger-compiler:2.59.2")
 
     val ktorVersion = "3.4.0"
     implementation("io.ktor:ktor-server-core:$ktorVersion")

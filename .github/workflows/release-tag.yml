@@ -17,21 +17,13 @@ jobs:
     environment: foss-production
     steps:
       - name: Checkout source code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 #v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Setup project and build environment
         uses: ./.github/actions/common-setup
-
-      - name: Get the version
-        id: tagger
-        uses: jimschubert/query-tag-action@ebe504c35d1ea44d7272c8eccc7a71e2e4f1b1cb #v2
-        with:
-          skip-unshallow: 'true'
-          abbrev: false
-          commit-ish: HEAD
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a #v4.0.0
@@ -76,25 +68,12 @@ jobs:
       - name: Create ZIP file from the directory
         run: zip -r octi-server.zip ./build/install/octi-server
 
-      - name: Create pre-release
-        if: contains(steps.tagger.outputs.tag, '-')
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 #v1
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda #v3.0.0
         with:
-          prerelease: true
-          tag_name: ${{ steps.tagger.outputs.tag }}
-          name: ${{ steps.tagger.outputs.tag }}
-          generate_release_notes: true
-          files: octi-server.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create release
-        if: "!contains(steps.tagger.outputs.tag, '-')"
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 #v1
-        with:
-          prerelease: false
-          tag_name: ${{ steps.tagger.outputs.tag }}
-          name: ${{ steps.tagger.outputs.tag }}
+          prerelease: ${{ contains(github.ref_name, '-beta') }}
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           generate_release_notes: true
           files: octi-server.zip
         env:

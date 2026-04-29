@@ -52,7 +52,7 @@ Environment variables: `OCTI_PORT`, `OCTI_DEBUG`, `OCTI_DATA_DIR`
 
 - **code-checks.yml**: runs `assemble` + `check` on push to main and PRs
 - **release-tag.yml**: builds `installDist`, zips, creates GitHub release on `v*` tags
-- JDK 17 (adopt), Gradle 8.13
+- JDK 21 (temurin), Gradle 9.4.1
 
 ## Context Management
 
