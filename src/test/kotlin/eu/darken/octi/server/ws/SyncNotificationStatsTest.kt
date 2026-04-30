@@ -85,12 +85,16 @@ class SyncNotificationStatsTest {
 
         val line = snapshot.format(Duration.ofMinutes(1))
 
-        line shouldBe "sync-stats: 1m batches=2 events=8 " +
-            "deliveredPayloads=3 deliveredEvents=6 skippedSelfPeers=1 noPeers=1 " +
-            "closedSessions=1 bufferFullDrops=1 failures=0 " +
-            "modules=[eu.darken.octi.module.core.clipboard=5, eu.darken.octi.module.core.power=2, " +
-            "eu.darken.octi.module.core.meta=1]"
-        line shouldContain "modules=[eu.darken.octi.module.core.clipboard=5"
+        line shouldBe """
+            sync-stats: 1m
+              traffic: batches=2 events=8 deliveredPayloads=3 deliveredEvents=6
+              outcomes: skippedSelfPeers=1 noPeers=1 closedSessions=1 bufferFullDrops=1 failures=0
+              modules:
+                eu.darken.octi.module.core.clipboard=5
+                eu.darken.octi.module.core.power=2
+                eu.darken.octi.module.core.meta=1
+        """.trimIndent()
+        line shouldContain "\n    eu.darken.octi.module.core.clipboard=5"
     }
 
     private fun event(moduleId: String): SyncNotifier.EventPayload.Event.ModuleChanged =

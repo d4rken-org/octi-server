@@ -19,13 +19,24 @@ internal class SyncNotificationStats {
         fun format(window: Duration): String {
             val modules = moduleCounts.entries
                 .sortedWith(compareByDescending<Map.Entry<String, Long>> { it.value }.thenBy { it.key })
-                .joinToString(prefix = "[", postfix = "]") { "${it.key}=${it.value}" }
 
-            return "sync-stats: ${window.toCompactString()} batches=$batches events=$events " +
-                "deliveredPayloads=$deliveredPayloads deliveredEvents=$deliveredEvents " +
-                "skippedSelfPeers=$skippedSelfPeers noPeers=$noPeers " +
-                "closedSessions=$closedSessions bufferFullDrops=$bufferFullDrops failures=$failures " +
-                "modules=$modules"
+            return buildString {
+                appendLine("sync-stats: ${window.toCompactString()}")
+                appendLine(
+                    "  traffic: batches=$batches events=$events " +
+                        "deliveredPayloads=$deliveredPayloads deliveredEvents=$deliveredEvents"
+                )
+                appendLine(
+                    "  outcomes: skippedSelfPeers=$skippedSelfPeers noPeers=$noPeers " +
+                        "closedSessions=$closedSessions bufferFullDrops=$bufferFullDrops failures=$failures"
+                )
+                appendLine("  modules:")
+                if (modules.isEmpty()) {
+                    appendLine("    <none>")
+                } else {
+                    modules.forEach { appendLine("    ${it.key}=${it.value}") }
+                }
+            }.trimEnd()
         }
     }
 
