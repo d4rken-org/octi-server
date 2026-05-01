@@ -16,3 +16,4 @@ Sync server for the [Octi](https://github.com/d4rken-org/octi) Android app. Devi
 - [Build Commands](rules/build-commands.md) — Gradle commands, running locally, Docker, CI
 - [Testing](rules/testing.md) — TestRunner, integration tests, helpers
 - [Commit Guidelines](rules/commit-guidelines.md) — Commit message format and examples
+- [Releasing](rules/release.md) — Release flow, inputs, gotchas, recovery

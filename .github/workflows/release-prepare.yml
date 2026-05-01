@@ -1,0 +1,258 @@
+name: Release prepare
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: 'Version bump type (ignored when version is set)'
+        required: false
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      version:
+        description: 'Explicit version override, e.g. 1.2.3 or 1.2.3-rc1 (ignores bump_type)'
+        required: false
+        default: ''
+        type: string
+      expected_current:
+        description: 'Safety check: fail if gradle.properties version does not match this value'
+        required: false
+        default: ''
+        type: string
+      dry_run:
+        description: 'Dry run: validate and print plan only, skip commit/push'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-prepare-main
+  cancel-in-progress: false
+
+jobs:
+  compute-and-validate:
+    name: Compute and validate
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    outputs:
+      current_name: ${{ steps.read-version.outputs.current }}
+      new_name: ${{ steps.compute-version.outputs.new }}
+
+    steps:
+      - name: Guard — must run on main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF" != "refs/heads/main" ]]; then
+            echo "::error::This workflow must be dispatched from main (got $REF)"
+            exit 1
+          fi
+
+      - name: Checkout main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read current version
+        id: read-version
+        env:
+          EXPECTED_CURRENT: ${{ inputs.expected_current }}
+        run: |
+          set -euo pipefail
+          count=$(grep -cE '^version=' gradle.properties || true)
+          [[ "$count" == "1" ]] || { echo "::error::expected exactly one 'version=' line in gradle.properties, found $count"; exit 1; }
+          current=$(awk -F= '$1=="version"{print $2}' gradle.properties)
+          echo "$current" | grep -qE '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(rc|beta)(0|[1-9][0-9]*))?$' || {
+            echo "::error::current version '$current' does not match semver format"
+            exit 1
+          }
+          if [[ -n "$EXPECTED_CURRENT" && "$current" != "$EXPECTED_CURRENT" ]]; then
+            echo "::error::current version '$current' does not match expected_current '$EXPECTED_CURRENT'"
+            exit 1
+          fi
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+
+      - name: Compute next version
+        id: compute-version
+        env:
+          CURRENT: ${{ steps.read-version.outputs.current }}
+          BUMP_TYPE: ${{ inputs.bump_type }}
+          OVERRIDE: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          new=$(python3 - <<'PYEOF'
+          import re, sys, os
+          semver = re.compile(r'^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(rc|beta)(0|[1-9][0-9]*))?$')
+          def parse(v):
+              m = semver.match(v)
+              if not m: sys.exit(f"invalid version: {v}")
+              return (int(m[1]), int(m[2]), int(m[3]), m[4], int(m[5]) if m[5] else None)
+          def precedence(p):
+              return (p[0], p[1], p[2], 1 if p[3] is None else 0, p[3] or '', p[4] or 0)
+          cur = parse(os.environ['CURRENT'])
+          override = os.environ.get('OVERRIDE') or None
+          if override:
+              nxt = parse(override)
+          else:
+              if cur[3] is not None:
+                  sys.exit("bump_type rejected on prerelease current; use explicit version override")
+              x, y, z = cur[:3]
+              b = os.environ['BUMP_TYPE']
+              if   b == 'patch': z += 1
+              elif b == 'minor': y, z = y + 1, 0
+              elif b == 'major': x, y, z = x + 1, 0, 0
+              else: sys.exit(f"invalid bump_type: {b}")
+              nxt = (x, y, z, None, None)
+          if precedence(nxt) <= precedence(cur):
+              sys.exit(f"refusing downgrade: {nxt} not > {cur}")
+          pre = f"-{nxt[3]}{nxt[4]}" if nxt[3] else ''
+          print(f"{nxt[0]}.{nxt[1]}.{nxt[2]}{pre}")
+          PYEOF
+          )
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+
+      - name: Check tag collision
+        env:
+          NEW: ${{ steps.compute-version.outputs.new }}
+        run: |
+          set -euo pipefail
+          if git rev-parse --verify "refs/tags/v${NEW}" >/dev/null 2>&1; then
+            echo "::error::Local tag v${NEW} already exists"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v${NEW}" >/dev/null; then
+            echo "::error::Remote tag v${NEW} already exists"
+            exit 1
+          fi
+
+      - name: Write job summary
+        env:
+          CURRENT: ${{ steps.read-version.outputs.current }}
+          NEW: ${{ steps.compute-version.outputs.new }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          echo "| Field    | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Current  | \`$CURRENT\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| New      | \`$NEW\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Tag      | \`v$NEW\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dry run  | \`$DRY_RUN\` |" >> "$GITHUB_STEP_SUMMARY"
+
+  push-and-dispatch:
+    name: Push bump and tag
+    needs: compute-and-validate
+    if: ${{ !inputs.dry_run }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 #v3.1.1
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - name: Resolve bot identity
+        id: bot
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          user_id=$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)
+          echo "user_name=${APP_SLUG}[bot]" >> "$GITHUB_OUTPUT"
+          echo "user_email=${user_id}+${APP_SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout main with App token
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Re-validate current version
+        env:
+          EXPECTED: ${{ needs.compute-and-validate.outputs.current_name }}
+        run: |
+          set -euo pipefail
+          count=$(grep -cE '^version=' gradle.properties || true)
+          [[ "$count" == "1" ]] || { echo "::error::expected exactly one 'version=' line, found $count"; exit 1; }
+          current=$(awk -F= '$1=="version"{print $2}' gradle.properties)
+          [[ "$current" == "$EXPECTED" ]] || {
+            echo "::error::current version '$current' does not match expected '$EXPECTED' (main moved during job gap?)"
+            exit 1
+          }
+
+      - name: Re-check tag collision
+        env:
+          NEW: ${{ needs.compute-and-validate.outputs.new_name }}
+        run: |
+          set -euo pipefail
+          if git rev-parse --verify "refs/tags/v${NEW}" >/dev/null 2>&1; then
+            echo "::error::Local tag v${NEW} already exists"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v${NEW}" >/dev/null; then
+            echo "::error::Remote tag v${NEW} already exists"
+            exit 1
+          fi
+
+      - name: Apply version bump
+        env:
+          NEW: ${{ needs.compute-and-validate.outputs.new_name }}
+        run: |
+          set -euo pipefail
+          sed -i "s/^version=.*/version=${NEW}/" gradle.properties
+          count=$(grep -cE '^version=' gradle.properties || true)
+          [[ "$count" == "1" ]] || { echo "::error::expected exactly one version= line after bump, found $count"; exit 1; }
+          got=$(awk -F= '$1=="version"{print $2}' gradle.properties)
+          [[ "$got" == "$NEW" ]] || { echo "::error::bump verification failed: expected '$NEW' got '$got'"; exit 1; }
+
+      - name: Configure git identity
+        env:
+          GIT_USER_NAME: ${{ steps.bot.outputs.user_name }}
+          GIT_USER_EMAIL: ${{ steps.bot.outputs.user_email }}
+        run: |
+          set -euo pipefail
+          git config user.name "$GIT_USER_NAME"
+          git config user.email "$GIT_USER_EMAIL"
+
+      - name: Commit and tag
+        env:
+          NEW: ${{ needs.compute-and-validate.outputs.new_name }}
+        run: |
+          set -euo pipefail
+          git add gradle.properties
+          git commit -m "Release: v${NEW}"
+          git tag -a "v${NEW}" -m "Release v${NEW}"
+
+      - name: Atomic push
+        env:
+          NEW: ${{ needs.compute-and-validate.outputs.new_name }}
+        run: |
+          set -euo pipefail
+          git push --atomic origin HEAD:refs/heads/main "refs/tags/v${NEW}"
+
+      - name: Write final summary
+        env:
+          NEW: ${{ needs.compute-and-validate.outputs.new_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          echo "Pushed commit and tag \`v${NEW}\` to main." >> "$GITHUB_STEP_SUMMARY"
+          echo "The \`release-tag.yml\` workflow fired automatically — track it at:" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://github.com/${REPO}/actions/workflows/release-tag.yml" >> "$GITHUB_STEP_SUMMARY"

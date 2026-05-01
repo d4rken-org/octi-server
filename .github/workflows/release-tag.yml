@@ -4,12 +4,60 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: validate tag only, skip publish (default true)'
+        required: false
+        default: true
+        type: boolean
 
-permissions: {}
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
+  validate-tag:
+    name: Validate tag
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check tag format
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          echo "$TAG" | grep -qE '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(rc|beta)(0|[1-9][0-9]*))?$' || {
+            echo "::error::Tag '$TAG' does not match expected format vX.Y.Z[-rcN|-betaN]. Releases must be cut via the 'Release prepare' workflow."
+            exit 1
+          }
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check gradle.properties version matches tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          count=$(grep -cE '^version=' gradle.properties || true)
+          [[ "$count" == "1" ]] || { echo "::error::expected exactly one 'version=' line in gradle.properties, found $count"; exit 1; }
+          file_version=$(awk -F= '$1=="version"{print $2}' gradle.properties)
+          tag_version="${TAG#v}"
+          [[ "$file_version" == "$tag_version" ]] || {
+            echo "::error::gradle.properties version '$file_version' does not match tag '$TAG'. Releases must be cut via the 'Release prepare' workflow."
+            exit 1
+          }
+
   release-github:
     name: Create GitHub release
+    needs: [validate-tag]
+    if: "github.event_name != 'workflow_dispatch' || !inputs.dry_run"
     permissions:
       contents: write
       packages: write
@@ -71,7 +119,7 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda #v3.0.0
         with:
-          prerelease: ${{ contains(github.ref_name, '-beta') }}
+          prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           generate_release_notes: true

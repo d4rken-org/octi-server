@@ -7,7 +7,6 @@ plugins {
 }
 
 group = "eu.darken"
-version = "1.0-SNAPSHOT"
 
 repositories {
     mavenCentral()
