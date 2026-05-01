@@ -83,6 +83,18 @@ class AuthenticateDeviceTest {
 
         result.shouldBeInstanceOf<AuthResult.Failure>()
         result.status.value shouldBe 400
+        result.tag shouldBe "missing-device-id"
+    }
+
+    @Test
+    fun `blank or malformed device ID also tags missing-device-id`() = runTest {
+        val blank = authenticateDevice(deviceIdHeader = "   ", authHeader = basicAuth(), deviceRepo = deviceRepo)
+        blank.shouldBeInstanceOf<AuthResult.Failure>()
+        blank.tag shouldBe "missing-device-id"
+
+        val malformed = authenticateDevice(deviceIdHeader = "not-a-uuid", authHeader = basicAuth(), deviceRepo = deviceRepo)
+        malformed.shouldBeInstanceOf<AuthResult.Failure>()
+        malformed.tag shouldBe "missing-device-id"
     }
 
     @Test
@@ -95,6 +107,57 @@ class AuthenticateDeviceTest {
 
         result.shouldBeInstanceOf<AuthResult.Failure>()
         result.status.value shouldBe 400
+        result.tag shouldBe "missing-credentials"
+    }
+
+    @Test
+    fun `non-Basic auth scheme tags missing-credentials`() = runTest {
+        val result = authenticateDevice(
+            deviceIdHeader = deviceId.toString(),
+            authHeader = "Bearer some-token",
+            deviceRepo = deviceRepo,
+        )
+
+        result.shouldBeInstanceOf<AuthResult.Failure>()
+        result.tag shouldBe "missing-credentials"
+    }
+
+    @Test
+    fun `invalid base64 in Basic auth tags missing-credentials`() = runTest {
+        val result = authenticateDevice(
+            deviceIdHeader = deviceId.toString(),
+            authHeader = "Basic ##not-base64##",
+            deviceRepo = deviceRepo,
+        )
+
+        result.shouldBeInstanceOf<AuthResult.Failure>()
+        result.tag shouldBe "missing-credentials"
+    }
+
+    @Test
+    fun `Basic auth payload without colon tags missing-credentials`() = runTest {
+        val payload = Base64.getEncoder().encodeToString("no-colon-here".toByteArray())
+        val result = authenticateDevice(
+            deviceIdHeader = deviceId.toString(),
+            authHeader = "Basic $payload",
+            deviceRepo = deviceRepo,
+        )
+
+        result.shouldBeInstanceOf<AuthResult.Failure>()
+        result.tag shouldBe "missing-credentials"
+    }
+
+    @Test
+    fun `Basic auth with non-UUID account tags missing-credentials`() = runTest {
+        val payload = Base64.getEncoder().encodeToString("not-a-uuid:password".toByteArray())
+        val result = authenticateDevice(
+            deviceIdHeader = deviceId.toString(),
+            authHeader = "Basic $payload",
+            deviceRepo = deviceRepo,
+        )
+
+        result.shouldBeInstanceOf<AuthResult.Failure>()
+        result.tag shouldBe "missing-credentials"
     }
 
     @Test
@@ -110,6 +173,7 @@ class AuthenticateDeviceTest {
 
         result.shouldBeInstanceOf<AuthResult.Failure>()
         result.status.value shouldBe 404
+        result.tag shouldBe "unknown-device"
     }
 
     @Test
@@ -122,6 +186,7 @@ class AuthenticateDeviceTest {
 
         result.shouldBeInstanceOf<AuthResult.Failure>()
         result.status.value shouldBe 401
+        result.tag shouldBe "bad-credentials"
     }
 }
 

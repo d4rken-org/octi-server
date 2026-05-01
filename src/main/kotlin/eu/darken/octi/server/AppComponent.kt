@@ -5,6 +5,7 @@ import dagger.Component
 import eu.darken.octi.server.account.AccountRepo
 import eu.darken.octi.server.account.AccountStorageTracker
 import eu.darken.octi.server.common.serialization.SerializationModule
+import eu.darken.octi.server.device.DeviceClientIdentityTracker
 import eu.darken.octi.server.device.DeviceRepo
 import eu.darken.octi.server.module.ModuleLifecycleService
 import eu.darken.octi.server.module.ModuleRepo
@@ -29,6 +30,7 @@ interface AppComponent {
     fun lifecycleService(): ModuleLifecycleService
     fun accountRepo(): AccountRepo
     fun deviceRepo(): DeviceRepo
+    fun deviceClientIdentityTracker(): DeviceClientIdentityTracker
     fun json(): Json
 
     @Component.Builder

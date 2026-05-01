@@ -59,6 +59,7 @@ suspend fun TestEnvironment.createDeviceRaw(
     version: String? = null,
     platform: String? = null,
     label: String? = null,
+    userAgent: String? = null,
 ): HttpResponse = this.http.run {
     post {
         url {
@@ -69,6 +70,7 @@ suspend fun TestEnvironment.createDeviceRaw(
         if (version != null) headers.append("Octi-Device-Version", version)
         if (platform != null) headers.append("Octi-Device-Platform", platform)
         if (label != null) headers.append("Octi-Device-Label", label)
+        if (userAgent != null) headers.set(HttpHeaders.UserAgent, userAgent)
     }
 }
 
@@ -78,8 +80,9 @@ suspend fun TestEnvironment.createDevice(
     version: String? = null,
     platform: String? = null,
     label: String? = null,
+    userAgent: String? = null,
 ): Credentials {
-    val credentials = createDeviceRaw(deviceId, shareCode, version, platform, label).asAuth()
+    val credentials = createDeviceRaw(deviceId, shareCode, version, platform, label, userAgent).asAuth()
     return Credentials(deviceId, credentials)
 }
 

@@ -11,11 +11,13 @@ import eu.darken.octi.server.common.debug.logging.shortId
 import eu.darken.octi.server.common.headerDeviceId
 import eu.darken.octi.server.common.normalizeLabel
 import eu.darken.octi.server.common.verifyCaller
+import eu.darken.octi.server.device.DeviceClientIdentityTracker
 import eu.darken.octi.server.device.DeviceLimitExceededException
 import eu.darken.octi.server.device.DeviceRepo
 import eu.darken.octi.server.device.deviceCredentials
 import eu.darken.octi.server.module.ModuleLifecycleService
 import io.ktor.http.*
+import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.coroutines.NonCancellable
@@ -29,6 +31,7 @@ class AccountRoute @Inject constructor(
     private val deviceRepo: DeviceRepo,
     private val shareRepo: ShareRepo,
     private val lifecycleService: ModuleLifecycleService,
+    private val deviceClientIdentityTracker: DeviceClientIdentityTracker,
 ) {
 
     fun setup(rootRoute: Routing) {
@@ -108,6 +111,8 @@ class AccountRoute @Inject constructor(
             }
             throw e
         }
+
+        deviceClientIdentityTracker.recordUserAgent(device.key, call.request.userAgent())
 
         val response = RegisterResponse(
             accountID = device.accountId,

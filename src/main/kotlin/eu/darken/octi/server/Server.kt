@@ -11,12 +11,14 @@ import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
 import eu.darken.octi.server.common.AccountRateLimiter
 import eu.darken.octi.server.common.AccountRateLimiterKey
+import eu.darken.octi.server.common.DeviceClientIdentityTrackerKey
 import eu.darken.octi.server.common.IpDeviceTracker
 import eu.darken.octi.server.common.IpDeviceTrackerKey
 import eu.darken.octi.server.common.TrustedProxyIpsKey
 import eu.darken.octi.server.common.installCallLogging
 import eu.darken.octi.server.common.installRateLimit
 import io.ktor.server.plugins.bodylimit.*
+import eu.darken.octi.server.device.DeviceClientIdentityTracker
 import eu.darken.octi.server.device.DeviceRoute
 import eu.darken.octi.server.module.BlobRoute
 import eu.darken.octi.server.module.ModuleRoute
@@ -56,6 +58,7 @@ class Server @Inject constructor(
     private val serializers: SerializersModule,
     private val ipDeviceTracker: IpDeviceTracker,
     private val accountRateLimiter: AccountRateLimiter,
+    private val deviceClientIdentityTracker: DeviceClientIdentityTracker,
 ) {
 
     @Suppress("ExtractKtorModule")
@@ -111,6 +114,7 @@ class Server @Inject constructor(
             attributes.put(IpDeviceTrackerKey, ipDeviceTracker)
             attributes.put(AccountRateLimiterKey, accountRateLimiter)
             attributes.put(TrustedProxyIpsKey, config.trustedProxyIps)
+            attributes.put(DeviceClientIdentityTrackerKey, deviceClientIdentityTracker)
 
             config.rateLimit
                 ?.let { installRateLimit(it, ipDeviceTracker, config.trustedProxyIps) }

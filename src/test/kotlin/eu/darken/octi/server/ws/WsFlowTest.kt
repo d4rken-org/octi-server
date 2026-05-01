@@ -3,6 +3,7 @@ package eu.darken.octi.server.ws
 import eu.darken.octi.*
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.VERBOSE
 import eu.darken.octi.server.common.debug.logging.log
+import eu.darken.octi.server.device.DeviceKey
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.string.shouldContain
@@ -30,8 +31,10 @@ import kotlin.io.path.deleteRecursively
 class WsFlowTest : TestRunner() {
 
     /** Like runTest2 but uses runBlocking — WebSocket tests need real time, not virtual time */
-    private fun runWsTest(test: suspend TestEnvironment.() -> Unit) {
-        val appConfig = baseConfig.copy(port = 16024)
+    private fun runWsTest(
+        appConfig: eu.darken.octi.server.App.Config = baseConfig.copy(port = 16024),
+        test: suspend TestEnvironment.() -> Unit,
+    ) {
         Files.createDirectories(appConfig.dataPath)
         val component = eu.darken.octi.server.App.createComponent(appConfig)
         val app = component.application()
@@ -84,6 +87,68 @@ class WsFlowTest : TestRunner() {
     }
 
     @Test
+    fun `connect records debug user agent`() = runWsTest {
+        val userAgent = "octi/1.0.0-beta0/FOSS/dev-d0a81273"
+        val creds = createDevice(version = "1.0.0-beta0")
+        val key = DeviceKey(UUID.fromString(creds.account), creds.deviceId)
+        val wsClient = createWsClient()
+
+        wsClient.webSocket(
+            urlString = wsUrl(),
+            request = {
+                addCredentials(creds)
+                headers.set(HttpHeaders.UserAgent, userAgent)
+            },
+        ) {
+            close(CloseReason(CloseReason.Codes.NORMAL, "Test done"))
+        }
+
+        component.deviceClientIdentityTracker().userAgentFor(key) shouldBe userAgent
+        wsClient.close()
+    }
+
+    @Test
+    fun `rate-limited authenticated connect still records client identity`() = runWsTest(
+        appConfig = baseConfig.copy(
+            port = 16024,
+            accountRateLimit = 1,
+            accountRateLimitWindowSeconds = 60,
+        ),
+    ) {
+        val firstUserAgent = "octi/1.0.0/FOSS"
+        val overLimitUserAgent = "octi/2.0.0/GPLAY"
+        val creds = createDevice(version = "1.0.0")
+        val key = DeviceKey(UUID.fromString(creds.account), creds.deviceId)
+        val wsClient = createWsClient()
+
+        wsClient.webSocket(
+            urlString = wsUrl(),
+            request = {
+                addCredentials(creds)
+                headers.set(HttpHeaders.UserAgent, firstUserAgent)
+            },
+        ) {
+            close(CloseReason(CloseReason.Codes.NORMAL, "Test done"))
+        }
+
+        var closedWithRateLimit = false
+        wsClient.webSocket(
+            urlString = wsUrl(),
+            request = {
+                addCredentials(creds)
+                headers.set(HttpHeaders.UserAgent, overLimitUserAgent)
+            },
+        ) {
+            val reason = closeReason.await()
+            if (reason?.code == CloseReason.Codes.TRY_AGAIN_LATER.code) closedWithRateLimit = true
+        }
+
+        closedWithRateLimit shouldBe true
+        component.deviceClientIdentityTracker().userAgentFor(key) shouldBe overLimitUserAgent
+        wsClient.close()
+    }
+
+    @Test
     fun `connect without credentials fails`() = runWsTest {
         val wsClient = createWsClient()
 
@@ -114,6 +179,19 @@ class WsFlowTest : TestRunner() {
         }
         closedWithPolicy shouldBe true
         wsClient.close()
+    }
+
+    @Test
+    fun `WS auth failure is tracked with reason and user agent`() = runWsTest {
+        val wsClient = createWsClient()
+
+        wsClient.webSocket(urlString = wsUrl()) {
+            closeReason.await()
+        }
+        wsClient.close()
+
+        val failures = component.deviceClientIdentityTracker().snapshotAuthFailures()
+        failures.any { it.reasonTag == "missing-device-id" } shouldBe true
     }
 
     @Test

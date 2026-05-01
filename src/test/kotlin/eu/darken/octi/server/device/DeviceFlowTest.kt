@@ -167,6 +167,33 @@ class DeviceFlowTest : TestRunner() {
     }
 
     @Test
+    fun `debug user agent does not replace device version at registration`() = runTest2 {
+        val userAgent = "octi/1.0.0-beta0/FOSS/dev-d0a81273"
+        val creds = createDevice(version = "1.0.0-beta0", userAgent = userAgent)
+        val device = getDevices(creds).devices.single()
+        val key = DeviceKey(UUID.fromString(creds.account), creds.deviceId)
+
+        device.version shouldBe "1.0.0-beta0"
+        component.deviceClientIdentityTracker().userAgentFor(key) shouldBe userAgent
+    }
+
+    @Test
+    fun `debug user agent tracked on authenticated request without replacing version`() = runTest2 {
+        val userAgent = "octi/1.0.0-beta0/GPLAY/dev-d0a81273"
+        val creds = createDevice(version = "1.0.0-beta0")
+        val key = DeviceKey(UUID.fromString(creds.account), creds.deviceId)
+
+        http.get("/v1/devices") {
+            addCredentials(creds)
+            headers.append("Octi-Device-Version", "1.0.0-beta0")
+            headers.set(HttpHeaders.UserAgent, userAgent)
+        }
+
+        getDevices(creds).devices.single().version shouldBe "1.0.0-beta0"
+        component.deviceClientIdentityTracker().userAgentFor(key) shouldBe userAgent
+    }
+
+    @Test
     fun `platform stored at registration`() = runTest2 {
         val creds = createDevice(platform = "android")
         val device = getDevices(creds).devices.single()
@@ -243,6 +270,62 @@ class DeviceFlowTest : TestRunner() {
         }
 
         getDevices(creds).devices.single().platform shouldBe "desktop"
+    }
+
+    @Test
+    fun `auth failure with missing X-Device-ID is tracked`() = runTest2 {
+        http.get(endPoint).apply {
+            status shouldBe HttpStatusCode.BadRequest
+        }
+
+        val failures = component.deviceClientIdentityTracker().snapshotAuthFailures()
+        failures.size shouldBe 1
+        failures[0].reasonTag shouldBe "missing-device-id"
+        failures[0].userAgent shouldBe "ktor-client"
+    }
+
+    @Test
+    fun `auth failure with missing credentials is tracked`() = runTest2 {
+        val creds = createDevice()
+
+        http.get(endPoint) {
+            addDeviceId(creds.deviceId)
+        }.apply {
+            status shouldBe HttpStatusCode.BadRequest
+        }
+
+        val failures = component.deviceClientIdentityTracker().snapshotAuthFailures()
+        failures.any { it.reasonTag == "missing-credentials" } shouldBe true
+    }
+
+    @Test
+    fun `auth failure with unknown device is tracked`() = runTest2 {
+        val creds = createDevice()
+
+        http.get(endPoint) {
+            addDeviceId(UUID.randomUUID())
+            addAuth(creds.auth)
+        }.apply {
+            status shouldBe HttpStatusCode.NotFound
+        }
+
+        val failures = component.deviceClientIdentityTracker().snapshotAuthFailures()
+        failures.any { it.reasonTag == "unknown-device" } shouldBe true
+    }
+
+    @Test
+    fun `auth failure with bad password is tracked`() = runTest2 {
+        val creds = createDevice()
+
+        http.get(endPoint) {
+            addDeviceId(creds.deviceId)
+            addAuth(Auth(creds.account, "wrong-password"))
+        }.apply {
+            status shouldBe HttpStatusCode.Unauthorized
+        }
+
+        val failures = component.deviceClientIdentityTracker().snapshotAuthFailures()
+        failures.any { it.reasonTag == "bad-credentials" } shouldBe true
     }
 
     @Test

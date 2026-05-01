@@ -1,10 +1,12 @@
 package eu.darken.octi.server.account
 
 import eu.darken.octi.*
+import eu.darken.octi.server.device.DeviceKey
 import io.kotest.matchers.shouldBe
 import io.ktor.client.request.*
 import io.ktor.http.*
 import org.junit.jupiter.api.Test
+import java.util.UUID
 
 /**
  * Verifies the per-account rate limit gate (G4 / P5.2). The gate runs after
@@ -27,6 +29,31 @@ class AccountRateLimitFlowTest : TestRunner() {
         http.get("/v1/account/storage") { addCredentials(creds) }.status shouldBe HttpStatusCode.OK
         http.get("/v1/account/storage") { addCredentials(creds) }.status shouldBe HttpStatusCode.OK
         http.get("/v1/account/storage") { addCredentials(creds) }.status shouldBe HttpStatusCode.TooManyRequests
+    }
+
+    @Test
+    fun `over-limit authenticated request still records client identity`() = runTest2(
+        appConfig = baseConfig.copy(
+            accountRateLimit = 1,
+            accountRateLimitWindowSeconds = 60,
+        ),
+    ) {
+        val firstUserAgent = "octi/1.0.0/FOSS"
+        val overLimitUserAgent = "octi/2.0.0/GPLAY"
+        val creds = createDevice()
+        val key = DeviceKey(UUID.fromString(creds.account), creds.deviceId)
+
+        http.get("/v1/account/storage") {
+            addCredentials(creds)
+            headers.set(HttpHeaders.UserAgent, firstUserAgent)
+        }.status shouldBe HttpStatusCode.OK
+
+        http.get("/v1/account/storage") {
+            addCredentials(creds)
+            headers.set(HttpHeaders.UserAgent, overLimitUserAgent)
+        }.status shouldBe HttpStatusCode.TooManyRequests
+
+        component.deviceClientIdentityTracker().userAgentFor(key) shouldBe overLimitUserAgent
     }
 
     @Test

@@ -4,6 +4,7 @@ import eu.darken.octi.server.common.debug.logging.Logging.Priority.WARN
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
 import eu.darken.octi.server.device.Device
+import eu.darken.octi.server.device.DeviceClientIdentityTracker
 import eu.darken.octi.server.device.DeviceId
 import eu.darken.octi.server.device.DeviceKey
 import eu.darken.octi.server.device.DeviceRepo
@@ -17,6 +18,7 @@ import java.time.Instant
 import java.util.*
 
 val IpDeviceTrackerKey = AttributeKey<IpDeviceTracker>("IpDeviceTracker")
+val DeviceClientIdentityTrackerKey = AttributeKey<DeviceClientIdentityTracker>("DeviceClientIdentityTracker")
 
 private val TAG = logTag("Auth")
 
@@ -35,7 +37,7 @@ val RoutingCall.headerDeviceId: DeviceId?
 
 sealed interface AuthResult {
     data class Success(val deviceId: DeviceId, val device: Device) : AuthResult
-    data class Failure(val reason: String, val status: HttpStatusCode) : AuthResult
+    data class Failure(val reason: String, val tag: String, val status: HttpStatusCode) : AuthResult
 }
 
 data class DeviceMetadataPatch(
@@ -58,16 +60,32 @@ suspend fun authenticateDevice(
     deviceRepo: DeviceRepo,
 ): AuthResult {
     val deviceId = parseDeviceId(deviceIdHeader)
-        ?: return AuthResult.Failure("X-Device-ID header is missing", HttpStatusCode.BadRequest)
+        ?: return AuthResult.Failure(
+            reason = "X-Device-ID header is missing",
+            tag = "missing-device-id",
+            status = HttpStatusCode.BadRequest,
+        )
 
     val creds = DeviceCredentials.parseFromHeader(authHeader)
-        ?: return AuthResult.Failure("Device credentials are missing", HttpStatusCode.BadRequest)
+        ?: return AuthResult.Failure(
+            reason = "Device credentials are missing",
+            tag = "missing-credentials",
+            status = HttpStatusCode.BadRequest,
+        )
 
     val device = deviceRepo.getDevice(DeviceKey(creds.accountId, deviceId))
-        ?: return AuthResult.Failure("Unknown device: $deviceId", HttpStatusCode.NotFound)
+        ?: return AuthResult.Failure(
+            reason = "Unknown device: $deviceId",
+            tag = "unknown-device",
+            status = HttpStatusCode.NotFound,
+        )
 
     if (!device.isAuthorized(creds)) {
-        return AuthResult.Failure("Device credentials not found or insufficient", HttpStatusCode.Unauthorized)
+        return AuthResult.Failure(
+            reason = "Device credentials not found or insufficient",
+            tag = "bad-credentials",
+            status = HttpStatusCode.Unauthorized,
+        )
     }
 
     return AuthResult.Success(deviceId, device)
@@ -122,6 +140,7 @@ fun parseStrongEtag(raw: String): String? {
 suspend fun RoutingContext.verifyCaller(tag: String, deviceRepo: DeviceRepo): Device? {
     val ipTracker = call.application.attributes.getOrNull(IpDeviceTrackerKey)
     val accountRateLimiter = call.application.attributes.getOrNull(AccountRateLimiterKey)
+    val deviceClientIdentityTracker = call.application.attributes.getOrNull(DeviceClientIdentityTrackerKey)
 
     // 1. Validate credentials (no side effects).
     val result = authenticateDevice(
@@ -133,10 +152,13 @@ suspend fun RoutingContext.verifyCaller(tag: String, deviceRepo: DeviceRepo): De
         is AuthResult.Success -> result.device
         is AuthResult.Failure -> {
             log(tag, WARN) { "verifyAuth(): ${result.reason}" }
+            deviceClientIdentityTracker?.recordAuthFailure(result.tag, call.request.userAgent())
             call.respond(result.status, result.reason)
             return null
         }
     }
+
+    deviceClientIdentityTracker?.recordUserAgent(device.key, call.request.userAgent())
 
     // 2. Per-account rate-limit gate. Over-limit calls don't get to update lastSeen.
     if (accountRateLimiter != null) {

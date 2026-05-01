@@ -13,7 +13,9 @@ import eu.darken.octi.server.common.debug.logging.Logging.Priority.INFO
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.WARN
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
+import eu.darken.octi.server.device.DeviceClientIdentityTracker
 import eu.darken.octi.server.device.DeviceRepo
+import io.ktor.server.request.*
 import io.ktor.server.routing.*
 import io.ktor.server.websocket.*
 import io.ktor.websocket.*
@@ -32,6 +34,7 @@ class WsRoute @Inject constructor(
     private val connectionRegistry: ConnectionRegistry,
     private val ipDeviceTracker: IpDeviceTracker,
     private val accountRateLimiter: AccountRateLimiter,
+    private val deviceClientIdentityTracker: DeviceClientIdentityTracker,
 ) {
 
     fun setup(rootRoute: Routing) {
@@ -45,10 +48,13 @@ class WsRoute @Inject constructor(
                 is AuthResult.Success -> authResult
                 is AuthResult.Failure -> {
                     log(TAG, WARN) { "WS auth failed: ${authResult.reason}" }
+                    deviceClientIdentityTracker.recordAuthFailure(authResult.tag, call.request.userAgent())
                     close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "Authentication failed"))
                     return@webSocket
                 }
             }
+
+            deviceClientIdentityTracker.recordUserAgent(auth.device.key, call.request.userAgent())
 
             // Per-account rate-limit applies to WS connection establishment too.
             if (accountRateLimiter.acquire(auth.device.accountId) is AccountRateLimiter.Decision.Rejected) {
