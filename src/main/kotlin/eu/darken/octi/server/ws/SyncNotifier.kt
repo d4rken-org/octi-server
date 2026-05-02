@@ -168,7 +168,7 @@ class SyncNotifier @Inject constructor(
 
     companion object {
         private const val DEBOUNCE_MS = 500L
-        private val STATS_INTERVAL: Duration = Duration.ofMinutes(1)
+        private val STATS_INTERVAL: Duration = Duration.ofMinutes(5)
         private val TAG = logTag("WS", "SyncNotifier")
     }
 }
