@@ -13,6 +13,7 @@ import eu.darken.octi.server.common.debug.logging.Logging.Priority.INFO
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.WARN
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
+import eu.darken.octi.server.device.AUTH_FAILURE_SOURCE_WS
 import eu.darken.octi.server.device.DeviceClientIdentityTracker
 import eu.darken.octi.server.device.DeviceRepo
 import io.ktor.server.request.*
@@ -48,7 +49,11 @@ class WsRoute @Inject constructor(
                 is AuthResult.Success -> authResult
                 is AuthResult.Failure -> {
                     log(TAG, WARN) { "WS auth failed: ${authResult.reason}" }
-                    deviceClientIdentityTracker.recordAuthFailure(authResult.tag, call.request.userAgent())
+                    deviceClientIdentityTracker.recordAuthFailure(
+                        reasonTag = authResult.tag,
+                        rawUserAgent = call.request.userAgent(),
+                        source = AUTH_FAILURE_SOURCE_WS,
+                    )
                     close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "Authentication failed"))
                     return@webSocket
                 }

@@ -53,7 +53,13 @@ class DeviceActivityReporter @Inject constructor(
     data class ReasonBreakdown(
         val reasonTag: String,
         val count: Int,
+        val sources: List<SourceCount>,
         val topUserAgents: List<UserAgentCount>,
+    )
+
+    data class SourceCount(
+        val source: String,
+        val count: Int,
     )
 
     data class UserAgentCount(
@@ -89,11 +95,13 @@ class DeviceActivityReporter @Inject constructor(
         private const val UNKNOWN_VERSION = "<unknown>"
         private const val UNKNOWN_BUILD_FLAVOR = "<unknown>"
         private const val UNKNOWN_USER_AGENT = "<unknown>"
+        private const val UNKNOWN_SOURCE = "<unknown>"
         private const val MAX_VERSION_DISPLAY_LENGTH = 80
         private const val FAILURE_TOP_USER_AGENTS = 5
         private val CONTROL_CHARS = Regex("[\\p{Cntrl}]+")
         private val BUILD_FLAVOR_TOKEN_SEPARATOR = Regex("[^A-Za-z0-9]+")
         private val BUILD_FLAVOR_ORDER = listOf("FOSS", "GPLAY", UNKNOWN_BUILD_FLAVOR)
+        private val SOURCE_ORDER = listOf(AUTH_FAILURE_SOURCE_HTTP, AUTH_FAILURE_SOURCE_WS, UNKNOWN_SOURCE)
         private val TAG = logTag("Device", "Activity")
 
         internal fun buildReport(
@@ -167,6 +175,12 @@ class DeviceActivityReporter @Inject constructor(
                 ?: UNKNOWN_USER_AGENT
         }
 
+        private fun sourceLabel(raw: String): String {
+            return sanitizeForLog(raw)
+                ?.take(32)
+                ?: UNKNOWN_SOURCE
+        }
+
         private fun buildWindowStats(
             label: String,
             window: Duration,
@@ -225,6 +239,15 @@ class DeviceActivityReporter @Inject constructor(
             val byReason = windowed
                 .groupBy { it.reasonTag }
                 .map { (reason, events) ->
+                    val sourceCounts = events
+                        .groupingBy { sourceLabel(it.source) }
+                        .eachCount()
+                        .entries
+                        .map { SourceCount(it.key, it.value) }
+                        .sortedWith(compareBy<SourceCount> {
+                            SOURCE_ORDER.indexOf(it.source).takeIf { index -> index >= 0 } ?: Int.MAX_VALUE
+                        }.thenBy { it.source })
+
                     val topUserAgents = events
                         .groupingBy { userAgentLabel(it.userAgent) }
                         .eachCount()
@@ -232,7 +255,12 @@ class DeviceActivityReporter @Inject constructor(
                         .sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
                         .take(FAILURE_TOP_USER_AGENTS)
                         .map { UserAgentCount(it.key, it.value) }
-                    ReasonBreakdown(reasonTag = reason, count = events.size, topUserAgents = topUserAgents)
+                    ReasonBreakdown(
+                        reasonTag = reason,
+                        count = events.size,
+                        sources = sourceCounts,
+                        topUserAgents = topUserAgents,
+                    )
                 }
                 .sortedWith(compareByDescending<ReasonBreakdown> { it.count }.thenBy { it.reasonTag })
             return AuthFailureStats(total = windowed.size, byReason = byReason)
@@ -258,11 +286,16 @@ class DeviceActivityReporter @Inject constructor(
                 return
             }
             stats.byReason.forEach { reason ->
-                appendLine("      ${reason.reasonTag}=${reason.count}")
+                appendLine("      ${reason.reasonTag}=${reason.count}${reason.sources.formatSourceCounts()}")
                 reason.topUserAgents.forEach { ua ->
                     appendLine("        ${ua.userAgent}=${ua.count}")
                 }
             }
+        }
+
+        private fun List<SourceCount>.formatSourceCounts(): String {
+            if (isEmpty()) return ""
+            return joinToString(prefix = " (", postfix = ")") { "${it.source}=${it.count}" }
         }
 
         private fun StringBuilder.appendStatsSection(label: String, entries: List<String>) {

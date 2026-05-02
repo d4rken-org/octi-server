@@ -186,7 +186,12 @@ class DeviceActivityReporterTest {
         val failures = listOf(
             AuthFailureEvent(now.minus(Duration.ofMinutes(5)), "bad-credentials", "octi/1.0.0/FOSS"),
             AuthFailureEvent(now.minus(Duration.ofMinutes(5)), "bad-credentials", "octi/1.0.0/FOSS"),
-            AuthFailureEvent(now.minus(Duration.ofMinutes(5)), "bad-credentials", "ktor-client"),
+            AuthFailureEvent(
+                seenAt = now.minus(Duration.ofMinutes(5)),
+                reasonTag = "bad-credentials",
+                userAgent = "ktor-client",
+                source = AUTH_FAILURE_SOURCE_WS,
+            ),
             AuthFailureEvent(now.minus(Duration.ofMinutes(5)), "unknown-device", "octi/0.9.0/GPLAY"),
         )
 
@@ -200,6 +205,10 @@ class DeviceActivityReporterTest {
         report.oneHour.authFailures.byReason.map { it.reasonTag to it.count } shouldBe listOf(
             "bad-credentials" to 3,
             "unknown-device" to 1,
+        )
+        report.oneHour.authFailures.byReason[0].sources shouldBe listOf(
+            DeviceActivityReporter.SourceCount(AUTH_FAILURE_SOURCE_HTTP, 2),
+            DeviceActivityReporter.SourceCount(AUTH_FAILURE_SOURCE_WS, 1),
         )
         report.oneHour.authFailures.byReason[0].topUserAgents shouldBe listOf(
             DeviceActivityReporter.UserAgentCount("octi/1.0.0/FOSS", 2),
@@ -272,9 +281,9 @@ class DeviceActivityReporterTest {
                 versions:
                   1.0.0=1 (100.0%)
                 auth-failures: total=3
-                  bad-credentials=2
+                  bad-credentials=2 (http=2)
                     octi/1.0.0/FOSS=2
-                  missing-device-id=1
+                  missing-device-id=1 (http=1)
                     <unknown>=1
               24h: total=1
                 flavors:
@@ -282,9 +291,9 @@ class DeviceActivityReporterTest {
                 versions:
                   1.0.0=1 (100.0%)
                 auth-failures: total=3
-                  bad-credentials=2
+                  bad-credentials=2 (http=2)
                     octi/1.0.0/FOSS=2
-                  missing-device-id=1
+                  missing-device-id=1 (http=1)
                     <unknown>=1
             """.trimIndent()
     }

@@ -3,6 +3,7 @@ package eu.darken.octi.server.common
 import eu.darken.octi.server.device.Device
 import eu.darken.octi.server.device.DeviceKey
 import eu.darken.octi.server.device.DeviceRepo
+import eu.darken.octi.server.device.DeviceRepo.MissingDeviceReason
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
 import io.mockk.coEvery
@@ -163,7 +164,9 @@ class AuthenticateDeviceTest {
     @Test
     fun `unknown device returns NotFound`() = runTest {
         val unknownId = UUID.randomUUID()
-        coEvery { deviceRepo.getDevice(DeviceKey(accountId, unknownId)) } returns null
+        val unknownKey = DeviceKey(accountId, unknownId)
+        coEvery { deviceRepo.getDevice(unknownKey) } returns null
+        coEvery { deviceRepo.classifyMissingDevice(unknownKey) } returns MissingDeviceReason.UNKNOWN_DEVICE
 
         val result = authenticateDevice(
             deviceIdHeader = unknownId.toString(),
@@ -174,6 +177,42 @@ class AuthenticateDeviceTest {
         result.shouldBeInstanceOf<AuthResult.Failure>()
         result.status.value shouldBe 404
         result.tag shouldBe "unknown-device"
+    }
+
+    @Test
+    fun `unknown account returns NotFound with unknown-account tag`() = runTest {
+        val unknownAccount = UUID.randomUUID()
+        val unknownKey = DeviceKey(unknownAccount, deviceId)
+        coEvery { deviceRepo.getDevice(unknownKey) } returns null
+        coEvery { deviceRepo.classifyMissingDevice(unknownKey) } returns MissingDeviceReason.UNKNOWN_ACCOUNT
+
+        val result = authenticateDevice(
+            deviceIdHeader = deviceId.toString(),
+            authHeader = basicAuth(account = unknownAccount),
+            deviceRepo = deviceRepo,
+        )
+
+        result.shouldBeInstanceOf<AuthResult.Failure>()
+        result.status.value shouldBe 404
+        result.tag shouldBe "unknown-account"
+    }
+
+    @Test
+    fun `device account mismatch returns NotFound with mismatch tag`() = runTest {
+        val otherAccount = UUID.randomUUID()
+        val mismatchedKey = DeviceKey(otherAccount, deviceId)
+        coEvery { deviceRepo.getDevice(mismatchedKey) } returns null
+        coEvery { deviceRepo.classifyMissingDevice(mismatchedKey) } returns MissingDeviceReason.DEVICE_ACCOUNT_MISMATCH
+
+        val result = authenticateDevice(
+            deviceIdHeader = deviceId.toString(),
+            authHeader = basicAuth(account = otherAccount),
+            deviceRepo = deviceRepo,
+        )
+
+        result.shouldBeInstanceOf<AuthResult.Failure>()
+        result.status.value shouldBe 404
+        result.tag shouldBe "device-account-mismatch"
     }
 
     @Test

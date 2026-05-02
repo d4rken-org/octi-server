@@ -3,6 +3,7 @@ package eu.darken.octi.server.ws
 import eu.darken.octi.*
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.VERBOSE
 import eu.darken.octi.server.common.debug.logging.log
+import eu.darken.octi.server.device.AUTH_FAILURE_SOURCE_WS
 import eu.darken.octi.server.device.DeviceKey
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
@@ -158,6 +159,9 @@ class WsFlowTest : TestRunner() {
             if (reason?.code == CloseReason.Codes.VIOLATED_POLICY.code) closedWithPolicy = true
         }
         closedWithPolicy shouldBe true
+
+        val failures = component.deviceClientIdentityTracker().snapshotAuthFailures()
+        failures.any { it.reasonTag == "missing-device-id" && it.source == AUTH_FAILURE_SOURCE_WS } shouldBe true
         wsClient.close()
     }
 
@@ -191,7 +195,7 @@ class WsFlowTest : TestRunner() {
         wsClient.close()
 
         val failures = component.deviceClientIdentityTracker().snapshotAuthFailures()
-        failures.any { it.reasonTag == "missing-device-id" } shouldBe true
+        failures.any { it.reasonTag == "missing-device-id" && it.source == AUTH_FAILURE_SOURCE_WS } shouldBe true
     }
 
     @Test

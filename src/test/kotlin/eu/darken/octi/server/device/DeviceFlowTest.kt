@@ -314,6 +314,37 @@ class DeviceFlowTest : TestRunner() {
     }
 
     @Test
+    fun `auth failure with unknown account is tracked`() = runTest2 {
+        createDevice()
+
+        http.get(endPoint) {
+            addDeviceId(UUID.randomUUID())
+            addAuth(Auth(UUID.randomUUID().toString(), "missing-account-password"))
+        }.apply {
+            status shouldBe HttpStatusCode.NotFound
+        }
+
+        val failures = component.deviceClientIdentityTracker().snapshotAuthFailures()
+        failures.any { it.reasonTag == "unknown-account" } shouldBe true
+    }
+
+    @Test
+    fun `auth failure with device account mismatch is tracked`() = runTest2 {
+        val creds1 = createDevice()
+        val creds2 = createDevice()
+
+        http.get(endPoint) {
+            addDeviceId(creds1.deviceId)
+            addAuth(creds2.auth)
+        }.apply {
+            status shouldBe HttpStatusCode.NotFound
+        }
+
+        val failures = component.deviceClientIdentityTracker().snapshotAuthFailures()
+        failures.any { it.reasonTag == "device-account-mismatch" } shouldBe true
+    }
+
+    @Test
     fun `auth failure with bad password is tracked`() = runTest2 {
         val creds = createDevice()
 

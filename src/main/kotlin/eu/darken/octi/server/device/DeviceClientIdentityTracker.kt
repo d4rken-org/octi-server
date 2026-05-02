@@ -6,6 +6,10 @@ import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
+internal const val AUTH_FAILURE_SOURCE_HTTP = "http"
+internal const val AUTH_FAILURE_SOURCE_WS = "ws"
+private const val AUTH_FAILURE_SOURCE_UNKNOWN = "<unknown>"
+
 /**
  * In-memory client-identity tracker used for the device-activity log.
  * Stores the last User-Agent and `seenAt` per device for successful auth, and a capped
@@ -23,6 +27,7 @@ class DeviceClientIdentityTracker @Inject constructor() {
         val seenAt: Instant,
         val reasonTag: String,
         val userAgent: String,
+        val source: String = AUTH_FAILURE_SOURCE_HTTP,
     )
 
     private val activity = ConcurrentHashMap<DeviceKey, TrackedActivity>()
@@ -50,11 +55,17 @@ class DeviceClientIdentityTracker @Inject constructor() {
 
     fun snapshotActivity(): Map<DeviceKey, TrackedActivity> = activity.toMap()
 
-    fun recordAuthFailure(reasonTag: String, rawUserAgent: String?, seenAt: Instant = Instant.now()) {
+    fun recordAuthFailure(
+        reasonTag: String,
+        rawUserAgent: String?,
+        seenAt: Instant = Instant.now(),
+        source: String = AUTH_FAILURE_SOURCE_HTTP,
+    ) {
         val event = AuthFailureEvent(
             seenAt = seenAt,
             reasonTag = reasonTag,
             userAgent = sanitizeUserAgent(rawUserAgent) ?: "",
+            source = sanitizeSource(source) ?: AUTH_FAILURE_SOURCE_UNKNOWN,
         )
         synchronized(authFailuresLock) {
             authFailures.addLast(event)
@@ -84,6 +95,14 @@ class DeviceClientIdentityTracker @Inject constructor() {
                 ?.trim()
                 ?.ifBlank { null }
                 ?.take(MAX_USER_AGENT_LENGTH)
+        }
+
+        private fun sanitizeSource(raw: String?): String? {
+            return raw
+                ?.replace(CONTROL_CHARS, " ")
+                ?.trim()
+                ?.ifBlank { null }
+                ?.take(32)
         }
 
         private fun normalizeOctiUserAgent(raw: String?): String? {

@@ -200,6 +200,24 @@ class DeviceRepo @Inject constructor(
         return devices.values.any { it.id == deviceId }
     }
 
+    enum class MissingDeviceReason(val tag: String) {
+        UNKNOWN_ACCOUNT("unknown-account"),
+        DEVICE_ACCOUNT_MISMATCH("device-account-mismatch"),
+        UNKNOWN_DEVICE("unknown-device"),
+    }
+
+    suspend fun classifyMissingDevice(key: DeviceKey): MissingDeviceReason {
+        if (accountsRepo.getAccount(key.accountId) == null) {
+            return MissingDeviceReason.UNKNOWN_ACCOUNT
+        }
+
+        return if (devices.values.any { it.id == key.deviceId && it.accountId != key.accountId }) {
+            MissingDeviceReason.DEVICE_ACCOUNT_MISMATCH
+        } else {
+            MissingDeviceReason.UNKNOWN_DEVICE
+        }
+    }
+
     suspend fun getDevices(accountId: AccountId): Collection<Device> {
         val accountDevices = mutableSetOf<Device>()
         devices.forEach {

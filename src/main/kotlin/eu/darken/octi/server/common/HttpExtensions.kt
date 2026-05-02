@@ -4,6 +4,7 @@ import eu.darken.octi.server.common.debug.logging.Logging.Priority.WARN
 import eu.darken.octi.server.common.debug.logging.log
 import eu.darken.octi.server.common.debug.logging.logTag
 import eu.darken.octi.server.device.Device
+import eu.darken.octi.server.device.AUTH_FAILURE_SOURCE_HTTP
 import eu.darken.octi.server.device.DeviceClientIdentityTracker
 import eu.darken.octi.server.device.DeviceId
 import eu.darken.octi.server.device.DeviceKey
@@ -73,10 +74,11 @@ suspend fun authenticateDevice(
             status = HttpStatusCode.BadRequest,
         )
 
-    val device = deviceRepo.getDevice(DeviceKey(creds.accountId, deviceId))
+    val deviceKey = DeviceKey(creds.accountId, deviceId)
+    val device = deviceRepo.getDevice(deviceKey)
         ?: return AuthResult.Failure(
             reason = "Unknown device: $deviceId",
-            tag = "unknown-device",
+            tag = deviceRepo.classifyMissingDevice(deviceKey).tag,
             status = HttpStatusCode.NotFound,
         )
 
@@ -152,7 +154,11 @@ suspend fun RoutingContext.verifyCaller(tag: String, deviceRepo: DeviceRepo): De
         is AuthResult.Success -> result.device
         is AuthResult.Failure -> {
             log(tag, WARN) { "verifyAuth(): ${result.reason}" }
-            deviceClientIdentityTracker?.recordAuthFailure(result.tag, call.request.userAgent())
+            deviceClientIdentityTracker?.recordAuthFailure(
+                reasonTag = result.tag,
+                rawUserAgent = call.request.userAgent(),
+                source = AUTH_FAILURE_SOURCE_HTTP,
+            )
             call.respond(result.status, result.reason)
             return null
         }

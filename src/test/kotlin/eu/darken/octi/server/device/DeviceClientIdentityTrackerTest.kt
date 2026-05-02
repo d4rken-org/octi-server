@@ -93,7 +93,22 @@ class DeviceClientIdentityTrackerTest {
             seenAt = now,
             reasonTag = "bad-credentials",
             userAgent = "octi/1.0.0/FOSS",
+            source = AUTH_FAILURE_SOURCE_HTTP,
         )
+    }
+
+    @Test
+    fun `auth failure source is recorded`() {
+        val tracker = DeviceClientIdentityTracker()
+
+        tracker.recordAuthFailure(
+            reasonTag = "unknown-device",
+            rawUserAgent = "octi/1.0.0/FOSS",
+            seenAt = now,
+            source = AUTH_FAILURE_SOURCE_WS,
+        )
+
+        tracker.snapshotAuthFailures(now)[0].source shouldBe AUTH_FAILURE_SOURCE_WS
     }
 
     @Test
