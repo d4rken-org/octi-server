@@ -1,6 +1,11 @@
 # Octi Server
 
-[![Code tests & eval](https://img.shields.io/github/actions/workflow/status/d4rken-org/octi-server/code-checks.yml?logo=githubactions&label=Code%20tests)](https://github.com/d4rken-org/octi-server/actions)
+[![Code tests & eval](https://img.shields.io/github/actions/workflow/status/d4rken-org/octi-server/code-checks.yml?logo=githubactions&label=Code%20tests)](https://github.com/d4rken-org/octi-server/actions/workflows/code-checks.yml)
+[![Gradle wrapper](https://img.shields.io/github/actions/workflow/status/d4rken-org/octi-server/gradle-wrapper-validation.yml?logo=gradle&label=Gradle%20wrapper)](https://github.com/d4rken-org/octi-server/actions/workflows/gradle-wrapper-validation.yml)
+
+[![GitHub release](https://img.shields.io/github/v/release/d4rken-org/octi-server?logo=github&label=Release)](https://github.com/d4rken-org/octi-server/releases/latest)
+[![Docker image version](https://ghcr-badge.egpl.dev/d4rken-org/octi-server/latest_tag?trim=major&label=ghcr.io)](https://github.com/d4rken-org/octi-server/pkgs/container/octi-server)
+[![Docker image size](https://ghcr-badge.egpl.dev/d4rken-org/octi-server/size?color=%2344cc11&tag=latest&label=image%20size)](https://github.com/d4rken-org/octi-server/pkgs/container/octi-server)
 
 This is a synchronization server for [Octi](https://github.com/d4rken-org/octi)
 
