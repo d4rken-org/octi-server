@@ -78,6 +78,16 @@ class App @Inject constructor(
         val accountRateLimit: Int = 256,
         val accountRateLimitWindowSeconds: Long = 60,
         val trustedProxyIps: Set<String> = IpHelper.DEFAULT_TRUSTED_PROXY_IPS,
+        // Origins (scheme://host[:port]) allowed by the CORS plugin for browser clients.
+        // Ships with the official octi-web hosting origins so the OOB UX works without
+        // operator config. Pass `--cors-allowed-origins=` (empty) to disable browser
+        // access entirely. Non-browser clients (Android, desktop, CLI) are unaffected
+        // by this setting regardless.
+        val corsAllowedOrigins: Set<String> = setOf(
+            "https://web.octi.darken.eu",
+            "https://d4rken.github.io",
+            "https://d4rken-org.github.io",
+        ),
     )
 
     companion object {
@@ -145,6 +155,7 @@ class App @Inject constructor(
                 accountRateLimitWindowSeconds = parseLongFlag(args, "--account-rate-limit-window-seconds", min = 1)
                     ?: defaults.accountRateLimitWindowSeconds,
                 trustedProxyIps = parseTrustedProxyIps(args) ?: defaults.trustedProxyIps,
+                corsAllowedOrigins = parseCorsAllowedOrigins(args) ?: defaults.corsAllowedOrigins,
             )
         }
 
@@ -196,6 +207,29 @@ class App @Inject constructor(
                 .map {
                     IpHelper.parseIpOrNull(it)
                         ?: throw IllegalArgumentException("Invalid value for --trusted-proxy-ips: '$it'")
+                }
+                .toSet()
+        }
+
+        // Origins must look like "scheme://host" or "scheme://host:port" — we validate
+        // shape strictly so a typo (e.g. trailing slash, missing scheme, "*") fails the
+        // boot rather than silently producing an unreachable allowlist.
+        private val ORIGIN_REGEX = Regex("""^https?://[^/\s]+$""")
+
+        internal fun parseCorsAllowedOrigins(args: Array<String>): Set<String>? {
+            val matches = args.filter { it.startsWith("--cors-allowed-origins=") }
+            if (matches.isEmpty()) return null
+            require(matches.size == 1) { "--cors-allowed-origins specified more than once: ${matches.joinToString(" ")}" }
+            return matches.single()
+                .substringAfter('=')
+                .split(',')
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .map {
+                    require(ORIGIN_REGEX.matches(it)) {
+                        "Invalid value for --cors-allowed-origins: '$it' (expected scheme://host[:port], no trailing slash)"
+                    }
+                    it
                 }
                 .toSet()
         }

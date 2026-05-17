@@ -33,6 +33,7 @@ import io.ktor.server.netty.*
 import io.ktor.server.plugins.autohead.*
 // ConditionalHeaders not used globally — see comment in server setup
 import io.ktor.server.plugins.contentnegotiation.*
+import io.ktor.server.plugins.cors.routing.*
 import io.ktor.server.plugins.*
 import io.ktor.server.plugins.statuspages.*
 import io.ktor.server.response.*
@@ -65,6 +66,55 @@ class Server @Inject constructor(
     private val server by lazy {
         embeddedServer(Netty, config.port) {
             installCallLogging(config.trustedProxyIps)
+            // CORS is installed before rate-limit/auth so preflight OPTIONS short-circuit
+            // here and never reach those paths. Browser clients are the only callers
+            // subject to CORS; Android/desktop/CLI are unaffected regardless of config.
+            if (config.corsAllowedOrigins.isNotEmpty()) {
+                log(TAG, INFO) { "CORS allowed origins: ${config.corsAllowedOrigins.joinToString(", ")}" }
+                install(CORS) {
+                    config.corsAllowedOrigins.forEach { origin ->
+                        // hosts() expects host[:port] split from scheme; allowHost handles parsing.
+                        // Format already validated by App.parseCorsAllowedOrigins.
+                        val scheme = origin.substringBefore("://")
+                        val hostAndPort = origin.substringAfter("://")
+                        allowHost(hostAndPort, schemes = listOf(scheme))
+                    }
+                    allowMethod(HttpMethod.Get)
+                    allowMethod(HttpMethod.Post)
+                    allowMethod(HttpMethod.Put)
+                    allowMethod(HttpMethod.Patch)
+                    allowMethod(HttpMethod.Delete)
+                    allowMethod(HttpMethod.Head)
+                    allowMethod(HttpMethod.Options)
+                    allowHeader(HttpHeaders.Authorization)
+                    allowHeader(HttpHeaders.ContentType)
+                    allowHeader(HttpHeaders.IfMatch)
+                    allowHeader(HttpHeaders.IfNoneMatch)
+                    allowHeader(HttpHeaders.Range)
+                    allowHeader(HttpHeaders.IfRange)
+                    allowHeader("X-Device-ID")
+                    allowHeader("Octi-Device-Version")
+                    allowHeader("Octi-Device-Platform")
+                    allowHeader("Octi-Device-Label")
+                    allowHeader("Upload-Offset")
+                    exposeHeader(HttpHeaders.ETag)
+                    exposeHeader(HttpHeaders.LastModified)
+                    exposeHeader(HttpHeaders.ContentRange)
+                    exposeHeader(HttpHeaders.AcceptRanges)
+                    exposeHeader(HttpHeaders.RetryAfter)
+                    exposeHeader("Upload-Offset")
+                    exposeHeader("Upload-Length")
+                    exposeHeader("Upload-Expires")
+                    exposeHeader("Upload-State")
+                    exposeHeader("X-Blob-ID")
+                    // We use Authorization headers, not cookies — keep credentials off so
+                    // browsers don't refuse the response when the same origin is reused
+                    // across users on the SPA.
+                    allowCredentials = false
+                }
+            } else {
+                log(TAG, INFO) { "CORS disabled (--cors-allowed-origins= was set to empty); browser clients won't be able to reach this server" }
+            }
             install(AutoHeadResponse)
             // PartialContent is NOT installed globally — BlobRoute.downloadBlob handles
             // Range / If-Range / Last-Modified manually because BlobHandle wraps an
