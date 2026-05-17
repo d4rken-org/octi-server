@@ -69,6 +69,11 @@ fun Application.installRateLimit(
     }
 
     intercept(ApplicationCallPipeline.Plugins) {
+        // CORS preflight is a browser-internal protocol detail, not a meaningful client
+        // action. Counting it against the per-IP budget would let a chatty preflight
+        // pattern starve real traffic.
+        if (call.request.httpMethod == HttpMethod.Options) return@intercept
+
         val clientIp = call.request.clientIp(trustedProxyIps)
         val now = Instant.now()
         val calldetails = "${call.request.httpMethod.value} ${call.request.uri}"

@@ -7,6 +7,7 @@
 # - OCTI_DEBUG: Enable debug mode (default: false)
 # - OCTI_DATA_DIR: Override data directory path (default: auto-detect)
 # - OCTI_TRUSTED_PROXY_IPS: Comma-separated trusted proxy IPs (default: loopback)
+# - OCTI_CORS_ALLOWED_ORIGINS: Comma-separated origins (scheme://host[:port]) for browser clients (default: none)
 #
 # Default data path: /etc/octi-server
 # Deprecated path: /etc/octi-sync-server (still supported via auto-detection)
@@ -77,6 +78,7 @@ add_optional_arg OCTI_RATE_LIMIT "--rate-limit"
 add_optional_arg OCTI_RATE_LIMIT_WINDOW_SECONDS "--rate-limit-window-seconds"
 add_optional_arg OCTI_PAYLOAD_LIMIT_KB "--payload-limit-kb"
 add_optional_arg OCTI_TRUSTED_PROXY_IPS "--trusted-proxy-ips"
+add_optional_arg OCTI_CORS_ALLOWED_ORIGINS "--cors-allowed-origins"
 
 if [ "${OCTI_DISABLE_RATE_LIMITS:-false}" = "true" ]; then
     CMD_ARGS+=("--disable-rate-limits")

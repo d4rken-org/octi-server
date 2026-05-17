@@ -76,4 +76,68 @@ class AppCliParsingTest {
         // AccountRateLimiter.acquire treats <= 0 as disabled, so the default must be > 0.
         (cfg.accountRateLimit > 0) shouldBe true
     }
+
+    @Test
+    fun `--cors-allowed-origins defaults to the official octi-web hosting origins`() {
+        // OOB UX: a fresh self-hosted server can serve the official SPA without any flag.
+        // Self-hosters who want a tighter allowlist override via the flag (incl. empty).
+        val origins = App.parseConfig(baseArgs).corsAllowedOrigins
+        origins shouldBe setOf(
+            "https://web.octi.darken.eu",
+            "https://d4rken.github.io",
+            "https://d4rken-org.github.io",
+        )
+    }
+
+    @Test
+    fun `--cors-allowed-origins= (empty) disables browser access`() {
+        // Explicit empty value overrides the baked-in defaults. The split-and-filter
+        // pipeline naturally yields an empty set rather than crashing on empty input.
+        App.parseConfig(baseArgs + "--cors-allowed-origins=").corsAllowedOrigins shouldBe emptySet()
+    }
+
+    @Test
+    fun `--cors-allowed-origins parses a single origin`() {
+        val cfg = App.parseConfig(baseArgs + "--cors-allowed-origins=https://web.octi.darken.eu")
+        cfg.corsAllowedOrigins shouldBe setOf("https://web.octi.darken.eu")
+    }
+
+    @Test
+    fun `--cors-allowed-origins parses comma-separated origins with whitespace`() {
+        val cfg = App.parseConfig(baseArgs + "--cors-allowed-origins=https://web.octi.darken.eu, http://localhost:5173")
+        cfg.corsAllowedOrigins shouldBe setOf("https://web.octi.darken.eu", "http://localhost:5173")
+    }
+
+    @Test
+    fun `--cors-allowed-origins rejects bare host without scheme`() {
+        val ex = shouldThrow<IllegalArgumentException> {
+            App.parseConfig(baseArgs + "--cors-allowed-origins=web.octi.darken.eu")
+        }
+        ex.message!! shouldContain "--cors-allowed-origins"
+    }
+
+    @Test
+    fun `--cors-allowed-origins rejects trailing slash`() {
+        shouldThrow<IllegalArgumentException> {
+            App.parseConfig(baseArgs + "--cors-allowed-origins=https://web.octi.darken.eu/")
+        }
+    }
+
+    @Test
+    fun `--cors-allowed-origins rejects wildcard`() {
+        shouldThrow<IllegalArgumentException> {
+            App.parseConfig(baseArgs + "--cors-allowed-origins=*")
+        }
+    }
+
+    @Test
+    fun `--cors-allowed-origins rejects duplicate flags`() {
+        shouldThrow<IllegalArgumentException> {
+            App.parseConfig(
+                baseArgs +
+                    "--cors-allowed-origins=https://a.example" +
+                    "--cors-allowed-origins=https://b.example"
+            )
+        }
+    }
 }
