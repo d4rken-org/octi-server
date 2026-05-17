@@ -1,6 +1,7 @@
 package eu.darken.octi.server.common
 
 import eu.darken.octi.TestRunner
+import io.kotest.assertions.withClue
 import io.kotest.matchers.shouldBe
 import io.ktor.client.request.*
 import io.ktor.http.*
@@ -101,6 +102,36 @@ class CorsFlowTest : TestRunner() {
         }.apply {
             status shouldBe HttpStatusCode.Forbidden
             headers[HttpHeaders.AccessControlAllowOrigin] shouldBe null
+        }
+    }
+
+    @Test
+    fun `actual response exposes blob and upload headers to the browser`() = runTest2(appConfig = corsConfig) {
+        // Without Access-Control-Expose-Headers, fetch() in the SPA can't read these even
+        // though the server sends them — so we verify the configured exposeHeader set actually
+        // lands on a real (non-preflight) response.
+        http.get("/v1/status") {
+            header(HttpHeaders.Origin, allowedOrigin)
+        }.apply {
+            status shouldBe HttpStatusCode.OK
+            val exposed = headers[HttpHeaders.AccessControlExposeHeaders]?.lowercase() ?: ""
+            // Last-Modified is a CORS-safelisted response header — browsers expose it by default
+            // so Ktor's plugin (correctly) omits it from Access-Control-Expose-Headers even
+            // when we configure it. Not asserted here for that reason.
+            val expected = listOf(
+                "etag",
+                "content-range",
+                "accept-ranges",
+                "retry-after",
+                "upload-offset",
+                "upload-length",
+                "upload-expires",
+                "upload-state",
+                "x-blob-id",
+            )
+            withClue("Access-Control-Expose-Headers='$exposed' missing: ${expected.filterNot { it in exposed }}") {
+                expected.forEach { (it in exposed) shouldBe true }
+            }
         }
     }
 

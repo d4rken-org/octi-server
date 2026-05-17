@@ -95,6 +95,38 @@ class RateLimiterTest : TestRunner() {
     }
 
     @Test
+    fun `OPTIONS preflight does not consume rate limit budget`() = runTest2(
+        appConfig = baseConfig.copy(
+            rateLimit = RateLimitConfig(limit = 2, resetTime = Duration.ofSeconds(5)),
+            // CORS only added so OPTIONS gets a clean preflight response instead of 405;
+            // the bypass itself runs in the rate-limit interceptor before CORS sees the call.
+            corsAllowedOrigins = setOf("http://localhost:5173"),
+        )
+    ) {
+        // Hammer with preflights well past the limit — none of these should tick the counter.
+        repeat(10) {
+            http.options("/v1/devices") {
+                header(HttpHeaders.Origin, "http://localhost:5173")
+                header(HttpHeaders.AccessControlRequestMethod, HttpMethod.Get.value)
+            }
+            Thread.sleep(20)
+        }
+
+        // Both real GETs still pass — proves the budget is intact.
+        repeat(2) {
+            http.get("/v1/status").apply {
+                status shouldBe HttpStatusCode.OK
+            }
+            Thread.sleep(100)
+        }
+
+        // And the 3rd GET is rate-limited as normal.
+        http.get("/v1/status").apply {
+            status shouldBe HttpStatusCode.TooManyRequests
+        }
+    }
+
+    @Test
     fun `test stale rate limit entries are cleaned up`() = runTest2(
         appConfig = baseConfig.copy(
             rateLimit = RateLimitConfig(limit = 2, resetTime = Duration.ofSeconds(2))
