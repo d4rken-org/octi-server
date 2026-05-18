@@ -96,6 +96,7 @@ class Server @Inject constructor(
                     allowHeader("Octi-Device-Version")
                     allowHeader("Octi-Device-Platform")
                     allowHeader("Octi-Device-Label")
+                    allowHeader("Octi-Device-Capabilities")
                     allowHeader("Upload-Offset")
                     exposeHeader(HttpHeaders.ETag)
                     exposeHeader(HttpHeaders.LastModified)

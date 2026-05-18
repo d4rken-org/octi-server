@@ -10,6 +10,7 @@ import eu.darken.octi.server.common.debug.logging.logTag
 import eu.darken.octi.server.common.debug.logging.shortId
 import eu.darken.octi.server.common.headerDeviceId
 import eu.darken.octi.server.common.normalizeLabel
+import eu.darken.octi.server.common.parseCapabilitiesHeader
 import eu.darken.octi.server.common.verifyCaller
 import eu.darken.octi.server.device.DeviceClientIdentityTracker
 import eu.darken.octi.server.device.DeviceLimitExceededException
@@ -96,6 +97,7 @@ class AccountRoute @Inject constructor(
                 version = call.request.headers["Octi-Device-Version"] ?: call.request.headers["User-Agent"],
                 platform = call.request.headers["Octi-Device-Platform"],
                 label = normalizeLabel(call.request.headers["Octi-Device-Label"]),
+                capabilities = parseCapabilitiesHeader(call.request.headers["Octi-Device-Capabilities"]),
             )
         } catch (e: DeviceLimitExceededException) {
             if (share != null) {

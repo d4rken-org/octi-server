@@ -273,6 +273,80 @@ class DeviceFlowTest : TestRunner() {
     }
 
     @Test
+    fun `capabilities stored at registration and echoed in device list`() = runTest2 {
+        val caps = """["encryption:AES256_GCM_SIV","encryption:AES256_SIV","encryption:_reported"]"""
+        val creds = createDevice(capabilities = caps)
+        val device = getDevices(creds).devices.single()
+        device.capabilities shouldBe setOf(
+            "encryption:AES256_GCM_SIV",
+            "encryption:AES256_SIV",
+            "encryption:_reported",
+        )
+    }
+
+    @Test
+    fun `capabilities updates on authenticated request`() = runTest2 {
+        val creds = createDevice()
+        getDevices(creds).devices.single().capabilities shouldBe null
+
+        http.get("/v1/devices") {
+            addCredentials(creds)
+            headers.append("Octi-Device-Capabilities", """["encryption:_reported","encryption:AES256_GCM_SIV"]""")
+        }
+
+        getDevices(creds).devices.single().capabilities shouldBe setOf(
+            "encryption:_reported",
+            "encryption:AES256_GCM_SIV",
+        )
+    }
+
+    @Test
+    fun `capabilities not overwritten without header`() = runTest2 {
+        val creds = createDevice(capabilities = """["encryption:_reported","encryption:AES256_GCM_SIV"]""")
+        val initial = setOf("encryption:_reported", "encryption:AES256_GCM_SIV")
+        getDevices(creds).devices.single().capabilities shouldBe initial
+
+        http.get("/v1/devices") {
+            addCredentials(creds)
+        }
+
+        getDevices(creds).devices.single().capabilities shouldBe initial
+    }
+
+    @Test
+    fun `malformed capabilities header treated as absent`() = runTest2 {
+        val creds = createDevice(capabilities = "not json")
+        getDevices(creds).devices.single().capabilities shouldBe null
+    }
+
+    @Test
+    fun `capabilities with invalid tag shape rejects whole set`() = runTest2 {
+        // Mixed valid + invalid tags — entire set is dropped (consistency over partial acceptance).
+        val creds = createDevice(capabilities = """["encryption:AES256_GCM_SIV","BAD TAG"]""")
+        getDevices(creds).devices.single().capabilities shouldBe null
+    }
+
+    @Test
+    fun `capabilities with non-string element rejected`() = runTest2 {
+        val creds = createDevice(capabilities = """["encryption:AES256_GCM_SIV",42]""")
+        getDevices(creds).devices.single().capabilities shouldBe null
+    }
+
+    @Test
+    fun `capabilities with too many tags rejected`() = runTest2 {
+        val tags = (0 until 65).joinToString(",") { "\"ns:value$it\"" }
+        val creds = createDevice(capabilities = "[$tags]")
+        getDevices(creds).devices.single().capabilities shouldBe null
+    }
+
+    @Test
+    fun `empty capabilities array stored as empty set`() = runTest2 {
+        // Empty set is distinct from absent — explicit "I report no capabilities".
+        val creds = createDevice(capabilities = "[]")
+        getDevices(creds).devices.single().capabilities shouldBe emptySet()
+    }
+
+    @Test
     fun `auth failure with missing X-Device-ID is tracked`() = runTest2 {
         http.get(endPoint).apply {
             status shouldBe HttpStatusCode.BadRequest

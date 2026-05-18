@@ -74,6 +74,7 @@ class DeviceRoute @Inject constructor(
                     version = it.version,
                     platform = it.platform,
                     label = it.label,
+                    capabilities = it.capabilities,
                     addedAt = it.addedAt,
                     lastSeen = it.lastSeen,
                 )

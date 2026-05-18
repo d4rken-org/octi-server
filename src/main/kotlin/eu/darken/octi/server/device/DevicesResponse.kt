@@ -15,6 +15,7 @@ data class DevicesResponse(
         @SerialName("version") val version: String?,
         @SerialName("platform") val platform: String?,
         @SerialName("label") val label: String?,
+        @SerialName("capabilities") val capabilities: Set<String>? = null,
         @Contextual @SerialName("addedAt") val addedAt: Instant,
         @Contextual @SerialName("lastSeen") val lastSeen: Instant,
     )

@@ -15,6 +15,10 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.util.*
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import java.time.Instant
 import java.util.*
 
@@ -45,9 +49,61 @@ data class DeviceMetadataPatch(
     val version: String? = null,
     val platform: String? = null,
     val label: String? = null,
+    val capabilities: Set<String>? = null,
 )
 
 fun normalizeLabel(raw: String?): String? = raw?.trim()?.take(128)?.ifBlank { null }
+
+private val capabilityParseJson = Json { ignoreUnknownKeys = true }
+
+/**
+ * Parses the `Octi-Device-Capabilities` HTTP header value into a validated [Set] of tag
+ * strings. Mirrors the validation in the client-side `CapabilitiesCodec`: max [MAX_CAPABILITY_TAGS]
+ * tags, max [MAX_CAPABILITY_TAG_LENGTH] chars each, ASCII `<namespace>:<value>` shape.
+ *
+ * Returns `null` if the header is absent, blank, malformed, or violates a limit — the device
+ * is treated as not reporting capabilities. Drops the whole set on any bad tag (no partial
+ * acceptance) so peers see a consistent "either valid or absent" wire contract.
+ */
+fun parseCapabilitiesHeader(raw: String?): Set<String>? {
+    if (raw.isNullOrBlank()) return null
+    if (raw.length > MAX_CAPABILITY_HEADER_LENGTH) {
+        log(TAG, WARN) { "parseCapabilitiesHeader: header too long (${raw.length})" }
+        return null
+    }
+    val element = try {
+        capabilityParseJson.parseToJsonElement(raw)
+    } catch (e: SerializationException) {
+        log(TAG, WARN) { "parseCapabilitiesHeader: malformed JSON: ${e.message}" }
+        return null
+    }
+    val array = element as? JsonArray ?: run {
+        log(TAG, WARN) { "parseCapabilitiesHeader: not a JSON array" }
+        return null
+    }
+    if (array.size > MAX_CAPABILITY_TAGS) {
+        log(TAG, WARN) { "parseCapabilitiesHeader: too many tags (${array.size})" }
+        return null
+    }
+    val result = LinkedHashSet<String>(array.size.coerceAtLeast(1))
+    for (item in array) {
+        val str = (item as? JsonPrimitive)?.takeIf { it.isString }?.content ?: run {
+            log(TAG, WARN) { "parseCapabilitiesHeader: non-string element" }
+            return null
+        }
+        if (str.length > MAX_CAPABILITY_TAG_LENGTH || !CAPABILITY_TAG_REGEX.matches(str)) {
+            log(TAG, WARN) { "parseCapabilitiesHeader: invalid tag shape '$str'" }
+            return null
+        }
+        result.add(str)
+    }
+    return result
+}
+
+const val MAX_CAPABILITY_TAGS = 64
+const val MAX_CAPABILITY_TAG_LENGTH = 128
+const val MAX_CAPABILITY_HEADER_LENGTH = 4096
+val CAPABILITY_TAG_REGEX = Regex("""[a-z][a-z0-9]*:[A-Za-z0-9._\-]+""")
 
 /**
  * Validates the auth headers and returns the device on success — no side effects.
@@ -110,6 +166,7 @@ suspend fun touchAuthenticatedDevice(
         metadata?.version?.let { v -> updated = updated.copy(version = v) }
         metadata?.platform?.let { p -> updated = updated.copy(platform = p) }
         metadata?.label?.let { l -> updated = updated.copy(label = l) }
+        metadata?.capabilities?.let { c -> updated = updated.copy(capabilities = c) }
         updated
     }
     if (clientIp != null && ipTracker != null) {
@@ -191,6 +248,7 @@ suspend fun RoutingContext.verifyCaller(tag: String, deviceRepo: DeviceRepo): De
             version = call.request.header("Octi-Device-Version"),
             platform = call.request.header("Octi-Device-Platform"),
             label = normalizeLabel(call.request.header("Octi-Device-Label")),
+            capabilities = parseCapabilitiesHeader(call.request.header("Octi-Device-Capabilities")),
         ),
     )
 }
