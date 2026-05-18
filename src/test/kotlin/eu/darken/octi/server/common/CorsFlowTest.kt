@@ -140,12 +140,21 @@ class CorsFlowTest : TestRunner() {
         val response = http.options("/v1/account") {
             header(HttpHeaders.Origin, allowedOrigin)
             header(HttpHeaders.AccessControlRequestMethod, HttpMethod.Post.value)
-            header(HttpHeaders.AccessControlRequestHeaders, "${HttpHeaders.Authorization},X-Device-ID,Octi-Device-Platform,Octi-Device-Label")
+            header(
+                HttpHeaders.AccessControlRequestHeaders,
+                "${HttpHeaders.Authorization},X-Device-ID,Octi-Device-Platform,Octi-Device-Label,Octi-Device-Capabilities",
+            )
         }
         response.status shouldBe HttpStatusCode.OK
         val allowed = response.headers[HttpHeaders.AccessControlAllowHeaders]?.lowercase() ?: ""
         // Ktor folds requested headers into the response — assert each one we plan to send
-        listOf("authorization", "x-device-id", "octi-device-platform", "octi-device-label").forEach {
+        listOf(
+            "authorization",
+            "x-device-id",
+            "octi-device-platform",
+            "octi-device-label",
+            "octi-device-capabilities",
+        ).forEach {
             (it in allowed) shouldBe true
         }
     }

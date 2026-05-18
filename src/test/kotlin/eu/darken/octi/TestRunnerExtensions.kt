@@ -59,6 +59,7 @@ suspend fun TestEnvironment.createDeviceRaw(
     version: String? = null,
     platform: String? = null,
     label: String? = null,
+    capabilities: String? = null,
     userAgent: String? = null,
 ): HttpResponse = this.http.run {
     post {
@@ -70,6 +71,7 @@ suspend fun TestEnvironment.createDeviceRaw(
         if (version != null) headers.append("Octi-Device-Version", version)
         if (platform != null) headers.append("Octi-Device-Platform", platform)
         if (label != null) headers.append("Octi-Device-Label", label)
+        if (capabilities != null) headers.append("Octi-Device-Capabilities", capabilities)
         if (userAgent != null) headers.set(HttpHeaders.UserAgent, userAgent)
     }
 }
@@ -80,9 +82,10 @@ suspend fun TestEnvironment.createDevice(
     version: String? = null,
     platform: String? = null,
     label: String? = null,
+    capabilities: String? = null,
     userAgent: String? = null,
 ): Credentials {
-    val credentials = createDeviceRaw(deviceId, shareCode, version, platform, label, userAgent).asAuth()
+    val credentials = createDeviceRaw(deviceId, shareCode, version, platform, label, capabilities, userAgent).asAuth()
     return Credentials(deviceId, credentials)
 }
 
@@ -115,6 +118,7 @@ data class TestDevices(
         val version: String? = "ktor-client",
         val platform: String? = null,
         val label: String? = null,
+        val capabilities: Set<String>? = null,
         val addedAt: String? = null,
         val lastSeen: String? = null,
     )

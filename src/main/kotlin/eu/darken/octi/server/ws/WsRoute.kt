@@ -8,6 +8,7 @@ import eu.darken.octi.server.common.IpDeviceTracker
 import eu.darken.octi.server.common.authenticateDevice
 import eu.darken.octi.server.common.clientIp
 import eu.darken.octi.server.common.normalizeLabel
+import eu.darken.octi.server.common.parseCapabilitiesHeader
 import eu.darken.octi.server.common.touchAuthenticatedDevice
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.INFO
 import eu.darken.octi.server.common.debug.logging.Logging.Priority.WARN
@@ -80,6 +81,7 @@ class WsRoute @Inject constructor(
                     version = call.request.headers["Octi-Device-Version"],
                     platform = call.request.headers["Octi-Device-Platform"],
                     label = normalizeLabel(call.request.headers["Octi-Device-Label"]),
+                    capabilities = parseCapabilitiesHeader(call.request.headers["Octi-Device-Capabilities"]),
                 ),
             )
 
