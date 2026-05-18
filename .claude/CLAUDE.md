@@ -17,3 +17,4 @@ Sync server for the [Octi](https://github.com/d4rken-org/octi) Android app. Devi
 - [Testing](rules/testing.md) — TestRunner, integration tests, helpers
 - [Commit Guidelines](rules/commit-guidelines.md) — Commit message format and examples
 - [Releasing](rules/release.md) — Release flow, inputs, gotchas, recovery
+- [Device Capabilities](rules/device-capabilities.md) — Per-peer capability tag header: parse/store/echo, validation limits, dumb-pipe contract
