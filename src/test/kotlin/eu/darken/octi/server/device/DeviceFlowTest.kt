@@ -347,6 +347,27 @@ class DeviceFlowTest : TestRunner() {
     }
 
     @Test
+    fun `peer sees other device's capabilities via device list`() = runTest2 {
+        // End-to-end echo: device 2 joins with capabilities, device 1 reads them off the
+        // /v1/devices response. This is the user-visible contract the client-side feature
+        // depends on (peers learning each other's supported encryption modes).
+        val creds1 = createDevice()
+        val shareCode = createShareCode(creds1)
+        val creds2 = createDevice(
+            shareCode = shareCode,
+            capabilities = """["encryption:_reported","encryption:AES256_GCM_SIV"]""",
+        )
+
+        val devices = getDevices(creds1).devices
+        devices.size shouldBe 2
+        val peer = devices.single { it.id == creds2.deviceId }
+        peer.capabilities shouldBe setOf(
+            "encryption:_reported",
+            "encryption:AES256_GCM_SIV",
+        )
+    }
+
+    @Test
     fun `auth failure with missing X-Device-ID is tracked`() = runTest2 {
         http.get(endPoint).apply {
             status shouldBe HttpStatusCode.BadRequest

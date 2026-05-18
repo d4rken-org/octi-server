@@ -109,6 +109,34 @@ class WsFlowTest : TestRunner() {
     }
 
     @Test
+    fun `connect with Octi-Device-Capabilities stores the capabilities`() = runWsTest {
+        // WS connect goes through the same touchAuthenticatedDevice path as HTTP, but the
+        // wiring is in WsRoute (not HttpExtensions.verifyCaller). Pin it here so the WS
+        // wire claim in the PR description is actually test-covered.
+        val creds = createDevice()
+        val wsClient = createWsClient()
+
+        wsClient.webSocket(
+            urlString = wsUrl(),
+            request = {
+                addCredentials(creds)
+                headers.append(
+                    "Octi-Device-Capabilities",
+                    """["encryption:_reported","encryption:AES256_GCM_SIV"]""",
+                )
+            },
+        ) {
+            close(CloseReason(CloseReason.Codes.NORMAL, "Test done"))
+        }
+
+        getDevices(creds).devices.single().capabilities shouldBe setOf(
+            "encryption:_reported",
+            "encryption:AES256_GCM_SIV",
+        )
+        wsClient.close()
+    }
+
+    @Test
     fun `rate-limited authenticated connect still records client identity`() = runWsTest(
         appConfig = baseConfig.copy(
             port = 16024,
