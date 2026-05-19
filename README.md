@@ -7,7 +7,11 @@
 [![Docker image version](https://ghcr-badge.egpl.dev/d4rken-org/octi-server/latest_tag?trim=major&label=ghcr.io)](https://github.com/d4rken-org/octi-server/pkgs/container/octi-server)
 [![Docker image size](https://ghcr-badge.egpl.dev/d4rken-org/octi-server/size?color=%2344cc11&tag=latest&label=image%20size)](https://github.com/d4rken-org/octi-server/pkgs/container/octi-server)
 
-This is a synchronization server for [Octi](https://github.com/d4rken-org/octi)
+This is the synchronization server for the [Octi](https://github.com/d4rken-org/octi) ecosystem. It accepts connections from:
+
+* [Octi for Android](https://github.com/d4rken-org/octi) — the primary client.
+* [Octi Desktop](https://github.com/d4rken-org/octi-desktop) — Compose Multiplatform desktop client (early-stage).
+* [Octi Web](https://github.com/d4rken-org/octi-web) — browser-based client (early-stage).
 
 ## Setup
 
