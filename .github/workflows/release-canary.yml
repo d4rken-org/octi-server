@@ -120,31 +120,35 @@ jobs:
           labels: ${{ steps.docker-meta.outputs.labels }}
           annotations: ${{ steps.docker-meta.outputs.annotations }}
 
-      # GitHub's immutable-releases feature on this repo prevents editing existing releases
-      # and their tags. Rolling canary is therefore implemented as delete-then-create on
-      # every run. Per .claude/rules/release.md, tag rulesets cover only `main` and `v*`,
-      # so deletion of `canary` via GITHUB_TOKEN is permitted.
-      - name: Replace rolling canary release
+      # The `canary` tag is intentionally mutable. Per .claude/rules/release.md, tag rulesets
+      # in this org cover only `main` and `v*` tags, so GITHUB_TOKEN can force-update it.
+      # If a future ruleset covers `canary*`, switch this step to an App token.
+      - name: Move canary tag to current commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          TAG: ${{ steps.canary-meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${REPO}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            gh api --method PATCH "repos/${REPO}/git/refs/tags/${TAG}" -f sha="$SHA" -F force=true >/dev/null
+          else
+            gh api --method POST "repos/${REPO}/git/refs" -f ref="refs/tags/${TAG}" -f sha="$SHA" >/dev/null
+          fi
+
+      - name: Update rolling canary pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ github.sha }}
           TAG: ${{ steps.canary-meta.outputs.tag }}
           TITLE: ${{ steps.canary-meta.outputs.title }}
           NOTES_FILE: ${{ steps.canary-meta.outputs.notes_file }}
         run: |
           set -euo pipefail
-          main_head=$(gh api "repos/${REPO}/git/ref/heads/main" --jq .object.sha)
-          if [[ "$main_head" != "$SHA" ]]; then
-            echo "::error::main HEAD ($main_head) advanced past workflow SHA ($SHA); refusing to replace canary"
-            exit 1
-          fi
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release delete "$TAG" --yes
+            gh release upload "$TAG" octi-server-canary.zip --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes-file "$NOTES_FILE" --prerelease
+          else
+            gh release create "$TAG" octi-server-canary.zip --title "$TITLE" --notes-file "$NOTES_FILE" --prerelease --target "$SHA" --verify-tag
           fi
-          if gh api "repos/${REPO}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
-            gh api --method DELETE "repos/${REPO}/git/refs/tags/${TAG}" >/dev/null
-          fi
-          gh release create "$TAG" octi-server-canary.zip \
-            --title "$TITLE" --notes-file "$NOTES_FILE" \
-            --prerelease --target "$SHA"
