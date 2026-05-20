@@ -140,6 +140,7 @@ jobs:
       - name: Update rolling canary pre-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
           TAG: ${{ steps.canary-meta.outputs.tag }}
           TITLE: ${{ steps.canary-meta.outputs.title }}
           NOTES_FILE: ${{ steps.canary-meta.outputs.notes_file }}
@@ -147,7 +148,7 @@ jobs:
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" octi-server-canary.zip --clobber
-            gh release edit "$TAG" --title "$TITLE" --notes-file "$NOTES_FILE" --prerelease --target "$TAG"
+            gh release edit "$TAG" --title "$TITLE" --notes-file "$NOTES_FILE" --prerelease
           else
-            gh release create "$TAG" octi-server-canary.zip --title "$TITLE" --notes-file "$NOTES_FILE" --prerelease --target "$TAG"
+            gh release create "$TAG" octi-server-canary.zip --title "$TITLE" --notes-file "$NOTES_FILE" --prerelease --target "$SHA" --verify-tag
           fi
