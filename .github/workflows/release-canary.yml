@@ -24,8 +24,49 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Guard - workflow SHA must match main HEAD
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          main_head=$(gh api "repos/${REPO}/git/ref/heads/main" --jq .object.sha)
+          if [[ "$main_head" != "$SHA" ]]; then
+            echo "::error::main HEAD ($main_head) differs from workflow SHA ($SHA); refusing to publish canary"
+            exit 1
+          fi
+
       - name: Setup project and build environment
         uses: ./.github/actions/common-setup
+
+      - name: Package application
+        run: ./gradlew installDist
+
+      - name: Create ZIP file from the directory
+        run: zip -r octi-server-canary.zip ./build/install/octi-server
+
+      - name: Prepare canary metadata
+        id: canary-meta
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          short_sha="${SHA:0:7}"
+          tag="canary"
+          title="Canary (${short_sha})"
+          notes_file="canary-notes.md"
+          {
+            printf '## Octi Server Canary\n\n'
+            printf 'This is a rolling bleeding-edge pre-release built from `main`.\n\n'
+            printf -- '- Commit: `%s`\n' "$SHA"
+            printf -- '- Docker tags: `ghcr.io/%s:canary`, `ghcr.io/%s:sha-%s`\n\n' "$REPO" "$REPO" "$short_sha"
+            printf 'Do not use this build for production unless you accept breakage risk.\n'
+          } > "$notes_file"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+          echo "notes_file=$notes_file" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a #v4.0.0
@@ -56,6 +97,19 @@ jobs:
         env:
           DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
 
+      - name: Guard - main HEAD must still match before publishing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          main_head=$(gh api "repos/${REPO}/git/ref/heads/main" --jq .object.sha)
+          if [[ "$main_head" != "$SHA" ]]; then
+            echo "::error::main HEAD ($main_head) advanced past workflow SHA ($SHA); aborting before Docker push"
+            exit 1
+          fi
+
       - name: Build and push Docker image
         uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 #v7.0.0
         with:
@@ -66,36 +120,9 @@ jobs:
           labels: ${{ steps.docker-meta.outputs.labels }}
           annotations: ${{ steps.docker-meta.outputs.annotations }}
 
-      - name: Package application
-        run: ./gradlew installDist
-
-      - name: Create ZIP file from the directory
-        run: zip -r octi-server-canary.zip ./build/install/octi-server
-
-      - name: Prepare canary metadata
-        id: canary-meta
-        env:
-          SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          short_sha="${SHA:0:7}"
-          tag="canary"
-          title="Canary (${short_sha})"
-          notes_file="canary-notes.md"
-          {
-            echo "## Octi Server Canary"
-            echo
-            echo "This is a rolling bleeding-edge pre-release built from \\`main\\`."
-            echo
-            echo "- Commit: \\`${SHA}\\`"
-            echo "- Docker tags: \\`ghcr.io/${{ github.repository }}:canary\\`, \\`ghcr.io/${{ github.repository }}:sha-${short_sha}\\`"
-            echo
-            echo "Do not use this build for production unless you accept breakage risk."
-          } > "$notes_file"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "title=$title" >> "$GITHUB_OUTPUT"
-          echo "notes_file=$notes_file" >> "$GITHUB_OUTPUT"
-
+      # The `canary` tag is intentionally mutable. Per .claude/rules/release.md, tag rulesets
+      # in this org cover only `main` and `v*` tags, so GITHUB_TOKEN can force-update it.
+      # If a future ruleset covers `canary*`, switch this step to an App token.
       - name: Move canary tag to current commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
