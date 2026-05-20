@@ -13,21 +13,11 @@ runs:
       shell: bash
       run: chmod +x gradlew
 
-    - name: Cache Gradle Wrapper
-      uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 #v5.0.3
-      with:
-        path: |
-          ~/.gradle/wrapper
-          !~/.gradle/wrapper/dists/**/gradle*.zip
-        key: ${{ runner.os }}-gradle-wrapper-${{ hashFiles('**/gradle-wrapper.properties') }}
-        restore-keys: |
-          ${{ runner.os }}-gradle-wrapper-
-
-    - name: Cache Gradle Dependencies
-      uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 #v5.0.3
-      with:
-        path: |
-          ~/.gradle/caches
-        key: ${{ runner.os }}-gradle-caches-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', 'buildSrc/**/*.kt') }}
-        restore-keys: |
-          ${{ runner.os }}-gradle-caches-
+    # Use gradle/actions/setup-gradle for caching: it resolves GRADLE_USER_HOME
+    # correctly whether the job runs on the host runner (~ = /home/runner) or
+    # inside a container job (~ = /root), and produces a sane cache key from
+    # the Gradle build files. The previous manual actions/cache step targeted
+    # ~/.gradle/{wrapper,caches} which doesn't exist in container jobs and
+    # emitted "Path Validation Error" warnings — so caches were never saved.
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@50e97c2cd7a37755bbfafc9c5b7cafaece252f6e #v6.1.0
