@@ -100,6 +100,13 @@ class Server @Inject constructor(
                     allowHeader("Upload-Offset")
                     exposeHeader(HttpHeaders.ETag)
                     exposeHeader(HttpHeaders.LastModified)
+                    // ModuleRoute sets X-Modified-At with the payload's server-side
+                    // modification timestamp. Browsers can only read non-safelisted
+                    // response headers cross-origin when they're listed here.
+                    // octi-web's multi-connector merge uses it to order data when the
+                    // same peer device is reachable via two connectors — newest
+                    // X-Modified-At per (deviceId, moduleId) wins.
+                    exposeHeader("X-Modified-At")
                     exposeHeader(HttpHeaders.ContentRange)
                     exposeHeader(HttpHeaders.AcceptRanges)
                     exposeHeader(HttpHeaders.RetryAfter)
