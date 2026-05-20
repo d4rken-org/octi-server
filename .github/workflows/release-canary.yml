@@ -1,0 +1,126 @@
+name: Canary releases
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: canary-main
+  cancel-in-progress: true
+
+jobs:
+  release-canary:
+    name: Publish canary artifacts
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd #v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup project and build environment
+        uses: ./.github/actions/common-setup
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a #v4.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd #v4.0.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 #v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate Docker metadata
+        id: docker-meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf #v6.0.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=canary
+            type=sha,format=short,prefix=sha-
+          labels: |
+            org.opencontainers.image.title=Octi Server Canary
+            org.opencontainers.image.description=Bleeding edge synchronization server for Octi
+            org.opencontainers.image.vendor=d4rken-org
+            org.opencontainers.image.version=canary
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 #v7.0.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.docker-meta.outputs.tags }}
+          labels: ${{ steps.docker-meta.outputs.labels }}
+          annotations: ${{ steps.docker-meta.outputs.annotations }}
+
+      - name: Package application
+        run: ./gradlew installDist
+
+      - name: Create ZIP file from the directory
+        run: zip -r octi-server-canary.zip ./build/install/octi-server
+
+      - name: Prepare canary metadata
+        id: canary-meta
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          short_sha="${SHA:0:7}"
+          tag="canary"
+          title="Canary (${short_sha})"
+          notes_file="canary-notes.md"
+          {
+            echo "## Octi Server Canary"
+            echo
+            echo "This is a rolling bleeding-edge pre-release built from \\`main\\`."
+            echo
+            echo "- Commit: \\`${SHA}\\`"
+            echo "- Docker tags: \\`ghcr.io/${{ github.repository }}:canary\\`, \\`ghcr.io/${{ github.repository }}:sha-${short_sha}\\`"
+            echo
+            echo "Do not use this build for production unless you accept breakage risk."
+          } > "$notes_file"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+          echo "notes_file=$notes_file" >> "$GITHUB_OUTPUT"
+
+      - name: Move canary tag to current commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          TAG: ${{ steps.canary-meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${REPO}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            gh api --method PATCH "repos/${REPO}/git/refs/tags/${TAG}" -f sha="$SHA" -F force=true >/dev/null
+          else
+            gh api --method POST "repos/${REPO}/git/refs" -f ref="refs/tags/${TAG}" -f sha="$SHA" >/dev/null
+          fi
+
+      - name: Update rolling canary pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.canary-meta.outputs.tag }}
+          TITLE: ${{ steps.canary-meta.outputs.title }}
+          NOTES_FILE: ${{ steps.canary-meta.outputs.notes_file }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" octi-server-canary.zip --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes-file "$NOTES_FILE" --prerelease --target "$TAG"
+          else
+            gh release create "$TAG" octi-server-canary.zip --title "$TITLE" --notes-file "$NOTES_FILE" --prerelease --target "$TAG"
+          fi
