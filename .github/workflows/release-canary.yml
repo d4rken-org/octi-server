@@ -54,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           short_sha="${SHA:0:7}"
-          tag="canary"
+          tag="canary-latest"
           title="Canary (${short_sha})"
           notes_file="canary-notes.md"
           {
