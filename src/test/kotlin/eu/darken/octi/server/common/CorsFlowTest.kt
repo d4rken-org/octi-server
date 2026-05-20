@@ -128,6 +128,7 @@ class CorsFlowTest : TestRunner() {
                 "upload-expires",
                 "upload-state",
                 "x-blob-id",
+                "x-modified-at",
             )
             withClue("Access-Control-Expose-Headers='$exposed' missing: ${expected.filterNot { it in exposed }}") {
                 expected.forEach { (it in exposed) shouldBe true }
