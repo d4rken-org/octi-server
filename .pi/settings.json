@@ -1,0 +1,14 @@
+{
+  "packages": [
+    {
+      "source": "git:github.com/d4rken/clanker-cafe",
+      "autoload": false,
+      "skills": [
+        "plugins/support/pi/skills/*"
+      ],
+      "extensions": [
+        "plugins/support/pi/extensions/*"
+      ]
+    }
+  ]
+}
